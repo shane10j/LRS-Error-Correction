@@ -9,6 +9,15 @@ from torch import nn
 from .config import OmegaConfig
 from .modules import OverlapAggregator, SequenceEncoder
 from .support import compute_support_statistics
+from .vocab import EDIT_TO_ID
+
+_CORE_HARD_EDIT_IDS = [
+    EDIT_TO_ID["SUB_A"],
+    EDIT_TO_ID["SUB_C"],
+    EDIT_TO_ID["SUB_G"],
+    EDIT_TO_ID["SUB_T"],
+    EDIT_TO_ID["DEL"],
+]
 
 
 class OmegaModel(nn.Module):
@@ -43,7 +52,7 @@ class OmegaModel(nn.Module):
             dropout=mcfg.dropout,
             kernel_size=mcfg.conv_kernel_size,
         )
-        self.aggregator = OverlapAggregator(d_model, mcfg.num_heads, mcfg.dropout)
+        self.aggregator = OverlapAggregator(d_model, mcfg.dropout, support_feature_dim=6)
 
         self.edit_head = nn.Sequential(
             nn.Linear(2 * d_model, d_model),
@@ -70,6 +79,30 @@ class OmegaModel(nn.Module):
         if mcfg.support_mode not in {"full", "target_only", "support_only", "masked_target"}:
             raise ValueError(f"Unsupported support_mode={mcfg.support_mode!r}.")
 
+    def apply_support_confidence_filter(
+        self,
+        edit_logits: torch.Tensor,
+        support_stats: Dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        if not self.cfg.model.apply_hard_edit_support_filter:
+            return edit_logits
+        core_logits = edit_logits[:, :, -1, :]
+        agreement = support_stats["agreement"]
+        entropy = support_stats["entropy"]
+        depth = support_stats["depth"]
+        allow_hard_edit = (
+            (agreement >= self.cfg.model.hard_edit_min_support_agreement)
+            & (entropy <= self.cfg.model.hard_edit_max_support_entropy)
+            & (depth >= self.cfg.model.hard_edit_min_support_depth)
+        )
+        filtered_core_logits = core_logits.clone()
+        hard_edit_index = torch.tensor(_CORE_HARD_EDIT_IDS, device=core_logits.device)
+        penalty = (~allow_hard_edit).float().unsqueeze(-1) * self.cfg.model.hard_edit_filter_logit_bias
+        filtered_core_logits[..., hard_edit_index] = filtered_core_logits[..., hard_edit_index] - penalty
+        edit_logits = edit_logits.clone()
+        edit_logits[:, :, -1, :] = filtered_core_logits
+        return edit_logits
+
     def encode_target(self, target_bases: torch.Tensor, target_quals: torch.Tensor, target_run_lengths: torch.Tensor, target_mask: torch.Tensor) -> torch.Tensor:
         x = self.base_emb(target_bases) + self.qual_emb(target_quals.clamp_min(0))
         x = x + self.run_len_proj(target_run_lengths.unsqueeze(-1).float())
@@ -91,6 +124,7 @@ class OmegaModel(nn.Module):
         support_del_mask: torch.Tensor,
         support_valid_mask: torch.Tensor,
         support_base_support: torch.Tensor,
+        support_ins_base_support: torch.Tensor,
     ) -> torch.Tensor:
         batch, num_support, support_len = support_bases.shape
         feat = torch.stack(
@@ -102,7 +136,7 @@ class OmegaModel(nn.Module):
             ],
             dim=-1,
         )
-        feat = torch.cat([feat, support_base_support], dim=-1)
+        feat = torch.cat([feat, support_base_support, support_ins_base_support], dim=-1)
         x = self.support_base_emb(support_bases) + self.support_qual_emb(support_quals.clamp_min(0))
         x = x + self.support_feat_proj(feat)
         x = x.view(batch * num_support, support_len, -1)
@@ -129,20 +163,33 @@ class OmegaModel(nn.Module):
             batch.support_del_mask,
             batch.support_valid_mask,
             batch.support_base_support,
+            batch.support_ins_base_support,
         )
-        support_stats = compute_support_statistics(batch.support_base_support)
+        support_token_mask = batch.support_valid_mask & (
+            batch.support_del_mask.bool()
+            | batch.support_ins_mask.bool()
+            | batch.support_base_support.sum(dim=-1).gt(0)
+        )
+        support_stats = compute_support_statistics(
+            batch.support_base_support,
+            batch.support_del_mask,
+            batch.support_ins_base_support,
+        )
         support_features = torch.stack(
             [
                 support_stats["agreement"],
                 1.0 - support_stats["entropy"],
                 support_stats["depth_norm"],
+                support_stats["ins_agreement"],
+                1.0 - support_stats["ins_entropy"],
+                support_stats["ins_depth_norm"],
             ],
             dim=-1,
         )
         support_summary, trust_gate = self.aggregator(
             target_hidden,
             support_hidden,
-            batch.support_valid_mask,
+            support_token_mask,
             support_features,
         )
         if support_mode == "target_only":
@@ -166,6 +213,7 @@ class OmegaModel(nn.Module):
             self.num_edit_slots,
             self.cfg.model.edit_vocab_size,
         )
+        edit_logits = self.apply_support_confidence_filter(edit_logits, support_stats)
         return {
             "edit_logits": edit_logits,
             "support_logits": self.support_dist_head(fused),
@@ -177,6 +225,9 @@ class OmegaModel(nn.Module):
             "support_entropy": support_stats["entropy"],
             "support_agreement": support_stats["agreement"],
             "support_depth": support_stats["depth"],
+            "support_del_count": support_stats["del_counts"],
+            "support_ins_depth": support_stats["ins_depth"],
+            "support_ins_agreement": support_stats["ins_agreement"],
         }
 
     def get_config(self) -> dict:

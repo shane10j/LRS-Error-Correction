@@ -42,10 +42,14 @@ def build_consensus_predictions(batch, cfg: OmegaConfig, args: argparse.Namespac
     preds = torch.full((batch_size, seq_len, num_slots), PAD_EDIT_ID, dtype=torch.long, device=device)
     preds[:, :, -1] = EDIT_TO_ID["COPY"]
 
-    support_stats = compute_support_statistics(batch.support_base_support)
+    support_stats = compute_support_statistics(
+        batch.support_base_support,
+        batch.support_del_mask,
+        batch.support_ins_base_support,
+    )
     base_counts = support_stats["counts"]
-    evidence_depth = support_stats["depth"] + batch.support_del_mask.float().sum(dim=1)
-    delete_frac = batch.support_del_mask.float().sum(dim=1) / evidence_depth.clamp_min(1.0)
+    evidence_depth = support_stats["depth"]
+    delete_frac = support_stats["del_counts"] / evidence_depth.clamp_min(1.0)
     base_probs = base_counts / base_counts.sum(dim=-1, keepdim=True).clamp_min(1.0)
     base_agreement, best_base_idx = base_probs.max(dim=-1)
 
@@ -100,6 +104,8 @@ def main() -> None:
                 batch.metadata,
                 cfg.model.max_insertions_per_pos,
                 support_base_support=batch.support_base_support,
+                support_del_mask=batch.support_del_mask,
+                support_ins_base_support=batch.support_ins_base_support,
             )
         )
         core_preds = preds[:, :, -1]

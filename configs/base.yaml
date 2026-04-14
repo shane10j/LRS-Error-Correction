@@ -4,11 +4,16 @@ model:
   num_layers: 6
   ff_mult: 4
   dropout: 0.1
-  support_feature_dim: 8
+  support_feature_dim: 12
   max_supports: 16
   max_insertions_per_pos: 2
   conv_kernel_size: 5
   support_mode: full
+  apply_hard_edit_support_filter: false
+  hard_edit_min_support_agreement: 0.85
+  hard_edit_max_support_entropy: 0.35
+  hard_edit_min_support_depth: 2.0
+  hard_edit_filter_logit_bias: 3.0
 
 data:
   train_path: data/train.jsonl
@@ -44,7 +49,7 @@ loss:
   lambda_trust: 0.0
   lambda_hard_edit: 0.0
   lambda_selective_hard_edit: 0.0
-  lambda_support: 0.2
+  lambda_support: 0.0
   lambda_preserve: 0.15
   lambda_uncertainty: 0.1
   homopolymer_weight_scale: 0.15
@@ -61,3 +66,4 @@ loss:
   hard_edit_uncertainty_power: 1.0
   selective_hard_edit_confidence_threshold: 0.6
   selective_hard_edit_uncertainty_threshold: 0.4
+  selective_hard_edit_min_support_agreement: 0.85

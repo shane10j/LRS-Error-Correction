@@ -24,6 +24,7 @@ class Batch:
     support_del_mask: torch.Tensor
     support_valid_mask: torch.Tensor
     support_base_support: torch.Tensor
+    support_ins_base_support: torch.Tensor
     target_sequence_ids: torch.Tensor
     target_sequence_mask: torch.Tensor
     edit_labels: torch.Tensor
@@ -69,6 +70,7 @@ class LongReadDataset(Dataset):
             "support_ins_mask": item.get("support_ins_mask", []),
             "support_del_mask": item.get("support_del_mask", []),
             "support_base_support": item.get("support_base_support", []),
+            "support_ins_base_support": item.get("support_ins_base_support"),
             "target_sequence_ids": self.tokenizer.encode(item.get("target_sequence", "")),
             "edit_labels": edit_labels,
             "preserve_mask": item.get("preserve_mask", [0] * len(item["edit_labels"])),
@@ -136,6 +138,10 @@ def _pad_base_support(nested: List[List[List[List[float]]]]) -> torch.Tensor:
     return out
 
 
+def _zero_nested_base_support(support_bases: List[List[int]]) -> List[List[List[float]]]:
+    return [[[0.0, 0.0, 0.0, 0.0] for _ in seq] for seq in support_bases]
+
+
 def collate_long_reads(samples: List[Dict[str, Any]]) -> Batch:
     target_bases, target_mask = _pad_1d([s["target_bases"] for s in samples], PAD_BASE_ID)
     target_quals, _ = _pad_1d([s["target_quals"] for s in samples], 0)
@@ -151,6 +157,14 @@ def collate_long_reads(samples: List[Dict[str, Any]]) -> Batch:
     support_ins_mask, _ = _pad_2d_nested([s["support_ins_mask"] for s in samples], 0)
     support_del_mask, _ = _pad_2d_nested([s["support_del_mask"] for s in samples], 0)
     support_base_support = _pad_base_support([s["support_base_support"] for s in samples])
+    support_ins_base_support = _pad_base_support(
+        [
+            s["support_ins_base_support"]
+            if s.get("support_ins_base_support") is not None
+            else _zero_nested_base_support(s["support_bases"])
+            for s in samples
+        ]
+    )
 
     metadata = [
         {
@@ -175,6 +189,7 @@ def collate_long_reads(samples: List[Dict[str, Any]]) -> Batch:
         support_del_mask=support_del_mask,
         support_valid_mask=support_valid_mask,
         support_base_support=support_base_support,
+        support_ins_base_support=support_ins_base_support,
         target_sequence_ids=target_sequence_ids,
         target_sequence_mask=target_sequence_mask,
         edit_labels=edit_labels,

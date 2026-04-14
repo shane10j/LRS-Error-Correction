@@ -121,6 +121,76 @@ def summarize_edit_label_predictions(preds: torch.Tensor, labels: torch.Tensor) 
     return out
 
 
+def summarize_hard_edit_precision_stratified(
+    preds: torch.Tensor,
+    labels: torch.Tensor,
+    target_run_lengths: torch.Tensor,
+    support_base_support: torch.Tensor,
+    support_del_mask: torch.Tensor | None = None,
+    support_ins_base_support: torch.Tensor | None = None,
+) -> Dict[str, float]:
+    preds = preds.detach()
+    labels = labels.detach()
+    target_run_lengths = target_run_lengths.detach()
+    support_stats = compute_support_statistics(
+        support_base_support.detach(),
+        None if support_del_mask is None else support_del_mask.detach(),
+        None if support_ins_base_support is None else support_ins_base_support.detach(),
+    )
+
+    core_preds = preds[:, :, -1]
+    core_labels = labels[:, :, -1]
+    core_valid = core_labels.ne(PAD_EDIT_ID)
+    pred_sub_mask = torch.zeros_like(core_preds, dtype=torch.bool)
+    label_sub_mask = torch.zeros_like(core_labels, dtype=torch.bool)
+    for token_id in _SUB_IDS:
+        pred_sub_mask |= core_preds == token_id
+        label_sub_mask |= core_labels == token_id
+    pred_del_mask = core_preds == _DEL_ID
+    label_del_mask = core_labels == _DEL_ID
+
+    low_entropy_mask = support_stats["entropy"] <= _LOW_SUPPORT_ENTROPY_THRESHOLD
+    high_entropy_mask = support_stats["entropy"] >= _HIGH_SUPPORT_ENTROPY_THRESHOLD
+    low_agreement_mask = support_stats["agreement"] <= _LOW_SUPPORT_AGREEMENT_THRESHOLD
+    high_agreement_mask = support_stats["agreement"] >= _HIGH_SUPPORT_AGREEMENT_THRESHOLD
+    homopolymer_mask = target_run_lengths >= _HOMOPOLYMER_THRESHOLD
+    non_homopolymer_mask = ~homopolymer_mask
+
+    def precision(pred_mask: torch.Tensor, label_mask: torch.Tensor, region_mask: torch.Tensor) -> float:
+        mask = pred_mask & region_mask & core_valid
+        if mask.sum() == 0:
+            return 0.0
+        correct = mask & label_mask
+        return float((correct.sum().float() / mask.sum().float()).cpu())
+
+    def pred_count(pred_mask: torch.Tensor, region_mask: torch.Tensor) -> float:
+        return float((pred_mask & region_mask & core_valid).sum().cpu())
+
+    out = {
+        "sub_precision_low_entropy": precision(pred_sub_mask, label_sub_mask, low_entropy_mask),
+        "sub_precision_high_entropy": precision(pred_sub_mask, label_sub_mask, high_entropy_mask),
+        "sub_precision_low_agreement": precision(pred_sub_mask, label_sub_mask, low_agreement_mask),
+        "sub_precision_high_agreement": precision(pred_sub_mask, label_sub_mask, high_agreement_mask),
+        "sub_precision_homopolymer": precision(pred_sub_mask, label_sub_mask, homopolymer_mask),
+        "sub_precision_non_homopolymer": precision(pred_sub_mask, label_sub_mask, non_homopolymer_mask),
+        "delete_precision_low_entropy": precision(pred_del_mask, label_del_mask, low_entropy_mask),
+        "delete_precision_high_entropy": precision(pred_del_mask, label_del_mask, high_entropy_mask),
+        "delete_precision_low_agreement": precision(pred_del_mask, label_del_mask, low_agreement_mask),
+        "delete_precision_high_agreement": precision(pred_del_mask, label_del_mask, high_agreement_mask),
+        "delete_precision_homopolymer": precision(pred_del_mask, label_del_mask, homopolymer_mask),
+        "delete_precision_non_homopolymer": precision(pred_del_mask, label_del_mask, non_homopolymer_mask),
+        "sub_pred_count_low_entropy": pred_count(pred_sub_mask, low_entropy_mask),
+        "sub_pred_count_high_entropy": pred_count(pred_sub_mask, high_entropy_mask),
+        "sub_pred_count_low_agreement": pred_count(pred_sub_mask, low_agreement_mask),
+        "sub_pred_count_high_agreement": pred_count(pred_sub_mask, high_agreement_mask),
+        "delete_pred_count_low_entropy": pred_count(pred_del_mask, low_entropy_mask),
+        "delete_pred_count_high_entropy": pred_count(pred_del_mask, high_entropy_mask),
+        "delete_pred_count_low_agreement": pred_count(pred_del_mask, low_agreement_mask),
+        "delete_pred_count_high_agreement": pred_count(pred_del_mask, high_agreement_mask),
+    }
+    return out
+
+
 def summarize_edit_predictions(logits: torch.Tensor, labels: torch.Tensor) -> Dict[str, float]:
     preds = logits.argmax(dim=-1)
     return summarize_edit_label_predictions(preds, labels)
@@ -135,6 +205,8 @@ def summarize_sequence_label_predictions(
     metadata: List[Dict[str, object]],
     max_insertions_per_pos: int,
     support_base_support: torch.Tensor | None = None,
+    support_del_mask: torch.Tensor | None = None,
+    support_ins_base_support: torch.Tensor | None = None,
     trust_gate: torch.Tensor | None = None,
 ) -> Dict[str, float]:
     preds = preds.detach().cpu()
@@ -161,8 +233,16 @@ def summarize_sequence_label_predictions(
     support_entropy_by_window: List[float] = []
     support_agreement_by_window: List[float] = []
     trust_gate_by_window: List[float] = []
+    low_support_entropy_window_count = 0
+    high_support_entropy_window_count = 0
+    low_support_agreement_window_count = 0
+    high_support_agreement_window_count = 0
     if support_base_support is not None:
-        support_stats = compute_support_statistics(support_base_support.detach())
+        support_stats = compute_support_statistics(
+            support_base_support.detach(),
+            None if support_del_mask is None else support_del_mask.detach(),
+            None if support_ins_base_support is None else support_ins_base_support.detach(),
+        )
         support_entropy_cpu = support_stats["entropy"].detach().cpu()
         support_agreement_cpu = support_stats["agreement"].detach().cpu()
     else:
@@ -198,8 +278,10 @@ def summarize_sequence_label_predictions(
                 identity = seq_identities[-1]
                 if window_entropy <= _LOW_SUPPORT_ENTROPY_THRESHOLD:
                     low_support_entropy_identities.append(identity)
+                    low_support_entropy_window_count += 1
                 if window_entropy >= _HIGH_SUPPORT_ENTROPY_THRESHOLD:
                     high_support_entropy_identities.append(identity)
+                    high_support_entropy_window_count += 1
         if support_agreement_cpu is not None:
             window_agreement = float(support_agreement_cpu[i, :valid_len].mean().item())
             support_agreement_by_window.append(window_agreement)
@@ -207,8 +289,10 @@ def summarize_sequence_label_predictions(
                 identity = seq_identities[-1]
                 if window_agreement <= _LOW_SUPPORT_AGREEMENT_THRESHOLD:
                     low_support_agreement_identities.append(identity)
+                    low_support_agreement_window_count += 1
                 if window_agreement >= _HIGH_SUPPORT_AGREEMENT_THRESHOLD:
                     high_support_agreement_identities.append(identity)
+                    high_support_agreement_window_count += 1
         if trust_gate_cpu is not None:
             trust_gate_by_window.append(float(trust_gate_cpu[i, :valid_len].mean().item()))
 
@@ -258,6 +342,10 @@ def summarize_sequence_label_predictions(
         "support_entropy_window_mean": sum(support_entropy_by_window) / max(len(support_entropy_by_window), 1),
         "support_agreement_window_mean": sum(support_agreement_by_window) / max(len(support_agreement_by_window), 1),
         "trust_gate_window_mean": sum(trust_gate_by_window) / max(len(trust_gate_by_window), 1),
+        "low_support_entropy_window_count": float(low_support_entropy_window_count),
+        "high_support_entropy_window_count": float(high_support_entropy_window_count),
+        "low_support_agreement_window_count": float(low_support_agreement_window_count),
+        "high_support_agreement_window_count": float(high_support_agreement_window_count),
     }
     return out
 
@@ -271,6 +359,8 @@ def summarize_sequence_predictions(
     metadata: List[Dict[str, object]],
     max_insertions_per_pos: int,
     support_base_support: torch.Tensor | None = None,
+    support_del_mask: torch.Tensor | None = None,
+    support_ins_base_support: torch.Tensor | None = None,
     trust_gate: torch.Tensor | None = None,
 ) -> Dict[str, float]:
     preds = logits.argmax(dim=-1)
@@ -283,6 +373,8 @@ def summarize_sequence_predictions(
         metadata,
         max_insertions_per_pos,
         support_base_support=support_base_support,
+        support_del_mask=support_del_mask,
+        support_ins_base_support=support_ins_base_support,
         trust_gate=trust_gate,
     )
 
@@ -290,13 +382,19 @@ def summarize_sequence_predictions(
 def summarize_support_trust(
     trust_gate: torch.Tensor,
     support_base_support: torch.Tensor,
+    support_del_mask: torch.Tensor,
+    support_ins_base_support: torch.Tensor,
     target_run_lengths: torch.Tensor,
     target_mask: torch.Tensor,
 ) -> Dict[str, float]:
     trust_gate = trust_gate.detach()
     target_run_lengths = target_run_lengths.detach()
     target_mask = target_mask.detach()
-    support_stats = compute_support_statistics(support_base_support.detach())
+    support_stats = compute_support_statistics(
+        support_base_support.detach(),
+        support_del_mask.detach(),
+        support_ins_base_support.detach(),
+    )
     valid_mask = target_mask.bool()
     low_entropy_mask = support_stats["entropy"] <= _LOW_SUPPORT_ENTROPY_THRESHOLD
     high_entropy_mask = support_stats["entropy"] >= _HIGH_SUPPORT_ENTROPY_THRESHOLD

@@ -13,10 +13,12 @@ from torch.utils.data import DataLoader
 from omega_longread.config import OmegaConfig
 from omega_longread.dataset import LongReadDataset, collate_long_reads
 from omega_longread.decode import apply_edit_ops
+from omega_longread.decode import filter_low_confidence_hard_edits
 from omega_longread.losses import OmegaLoss, resolve_edit_class_weights
 from omega_longread.metrics import (
     aggregate_metric_dicts,
     estimate_overcorrection,
+    summarize_hard_edit_precision_stratified,
     summarize_edit_predictions,
     summarize_sequence_predictions,
     summarize_support_trust,
@@ -79,10 +81,14 @@ def evaluate() -> None:
         with autocast(enabled=cfg.train.mixed_precision and device.type == "cuda"):
             outputs = model(batch)
             _, row = criterion(outputs, batch)
-        row.update(summarize_edit_predictions(outputs["edit_logits"], batch.edit_labels))
+        metric_logits = filter_low_confidence_hard_edits(
+            outputs["edit_logits"].detach(),
+            min_hard_edit_confidence=cfg.model.inference_hard_edit_confidence_threshold,
+        )
+        row.update(summarize_edit_predictions(metric_logits, batch.edit_labels))
         row.update(
             summarize_sequence_predictions(
-                outputs["edit_logits"],
+                metric_logits,
                 batch.edit_labels,
                 batch.target_bases,
                 batch.target_mask,
@@ -90,6 +96,8 @@ def evaluate() -> None:
                 batch.metadata,
                 cfg.model.max_insertions_per_pos,
                 support_base_support=batch.support_base_support,
+                support_del_mask=batch.support_del_mask,
+                support_ins_base_support=batch.support_ins_base_support,
                 trust_gate=outputs["trust_gate"],
             )
         )
@@ -97,13 +105,25 @@ def evaluate() -> None:
             summarize_support_trust(
                 outputs["trust_gate"],
                 batch.support_base_support,
+                batch.support_del_mask,
+                batch.support_ins_base_support,
                 batch.target_run_lengths,
                 batch.target_mask,
             )
         )
-        row["overcorrection_rate"] = estimate_overcorrection(outputs["edit_logits"], batch.preserve_mask, batch.edit_labels)
+        row.update(
+            summarize_hard_edit_precision_stratified(
+                metric_logits.argmax(dim=-1),
+                batch.edit_labels,
+                batch.target_run_lengths,
+                batch.support_base_support,
+                batch.support_del_mask,
+                batch.support_ins_base_support,
+            )
+        )
+        row["overcorrection_rate"] = estimate_overcorrection(metric_logits, batch.preserve_mask, batch.edit_labels)
 
-        pred_slots = outputs["edit_logits"].argmax(dim=-1).detach().cpu()
+        pred_slots = metric_logits.argmax(dim=-1).detach().cpu()
         noisy_batch = batch.target_bases.detach().cpu()
         mask_batch = batch.target_mask.detach().cpu()
         for i, meta in enumerate(batch.metadata):

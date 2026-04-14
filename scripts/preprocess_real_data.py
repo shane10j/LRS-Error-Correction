@@ -29,6 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--window-overlap", type=int, default=256)
     parser.add_argument("--min-window-size", type=int, default=256)
     parser.add_argument("--max-supports", type=int, default=16)
+    parser.add_argument("--min-supports-per-window", type=int, default=1)
     parser.add_argument("--max-insertions-per-pos", type=int, default=2)
     parser.add_argument("--min-mapq", type=int, default=20)
     parser.add_argument("--min-mapped-fraction", type=float, default=0.7)
@@ -123,6 +124,7 @@ def main() -> None:
                         window_start=window_start,
                         window_end=window_end,
                         max_supports=args.max_supports,
+                        min_supports_per_window=args.min_supports_per_window,
                         min_mapq=args.min_mapq,
                         min_confident_fraction=args.min_confident_fraction,
                         min_mapped_fraction=args.min_mapped_fraction,
@@ -146,6 +148,7 @@ def main() -> None:
         "window_size": args.window_size,
         "window_overlap": args.window_overlap,
         "max_supports": args.max_supports,
+        "min_supports_per_window": args.min_supports_per_window,
         "max_insertions_per_pos": args.max_insertions_per_pos,
         "counts": dict(counts),
         "train_path": str(output_paths["train"]),

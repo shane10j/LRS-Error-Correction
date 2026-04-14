@@ -15,11 +15,17 @@ class ModelConfig:
     num_layers: int = 6
     ff_mult: int = 4
     dropout: float = 0.1
-    support_feature_dim: int = 8
+    support_feature_dim: int = 12
     max_supports: int = 16
     max_insertions_per_pos: int = 2
     conv_kernel_size: int = 5
     support_mode: str = "full"
+    apply_hard_edit_support_filter: bool = False
+    hard_edit_min_support_agreement: float = 0.85
+    hard_edit_max_support_entropy: float = 0.35
+    hard_edit_min_support_depth: float = 2.0
+    hard_edit_filter_logit_bias: float = 3.0
+    inference_hard_edit_confidence_threshold: float = 0.0
 
 
 @dataclass
@@ -60,8 +66,9 @@ class LossConfig:
     lambda_insertion_count: float = 0.0
     lambda_trust: float = 0.0
     lambda_hard_edit: float = 0.0
+    lambda_hard_edit_precision: float = 0.0
     lambda_selective_hard_edit: float = 0.0
-    lambda_support: float = 0.2
+    lambda_support: float = 0.0
     lambda_preserve: float = 0.15
     lambda_uncertainty: float = 0.1
     homopolymer_weight_scale: float = 0.15
@@ -76,8 +83,15 @@ class LossConfig:
     deletion_loss_scale: float = 1.0
     insertion_loss_scale: float = 1.0
     hard_edit_uncertainty_power: float = 1.0
+    hard_edit_entropy_threshold: float = 0.35
+    hard_edit_agreement_threshold: float = 0.85
+    hard_edit_entropy_scale: float = 1.0
+    hard_edit_low_agreement_scale: float = 1.0
+    hard_edit_false_positive_weight: float = 4.0
+    hard_edit_false_negative_weight: float = 1.0
     selective_hard_edit_confidence_threshold: float = 0.6
     selective_hard_edit_uncertainty_threshold: float = 0.4
+    selective_hard_edit_min_support_agreement: float = 0.85
 
 
 @dataclass

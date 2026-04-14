@@ -2,7 +2,19 @@ from __future__ import annotations
 
 from typing import Iterable, List
 
+import torch
+
 from .vocab import ID_TO_EDIT
+from .vocab import EDIT_TO_ID
+
+_COPY_ID = EDIT_TO_ID["COPY"]
+_CORE_HARD_EDIT_IDS = {
+    EDIT_TO_ID["SUB_A"],
+    EDIT_TO_ID["SUB_C"],
+    EDIT_TO_ID["SUB_G"],
+    EDIT_TO_ID["SUB_T"],
+    EDIT_TO_ID["DEL"],
+}
 
 
 def apply_edit_ops(noisy_bases: str, edit_ids: Iterable[int] | Iterable[Iterable[int]], max_insertions_per_pos: int = 2) -> str:
@@ -38,3 +50,26 @@ def apply_edit_ops(noisy_bases: str, edit_ids: Iterable[int] | Iterable[Iterable
         else:
             out.append(noisy[i])
     return "".join(out)
+
+
+def filter_low_confidence_hard_edits(
+    edit_logits: torch.Tensor,
+    min_hard_edit_confidence: float = 0.0,
+) -> torch.Tensor:
+    if min_hard_edit_confidence <= 0.0:
+        return edit_logits
+    core_logits = edit_logits[:, :, -1, :]
+    core_probs = torch.softmax(core_logits, dim=-1)
+    pred_confidence, pred_ids = core_probs.max(dim=-1)
+    hard_edit_mask = torch.zeros_like(pred_ids, dtype=torch.bool)
+    for token_id in _CORE_HARD_EDIT_IDS:
+        hard_edit_mask |= pred_ids == token_id
+    low_conf_hard_edit_mask = hard_edit_mask & (pred_confidence < min_hard_edit_confidence)
+    if not low_conf_hard_edit_mask.any():
+        return edit_logits
+    forced_copy = torch.full_like(core_logits, -1e4)
+    forced_copy[..., _COPY_ID] = 1e4
+    filtered_core_logits = torch.where(low_conf_hard_edit_mask.unsqueeze(-1), forced_copy, core_logits)
+    filtered_edit_logits = edit_logits.clone()
+    filtered_edit_logits[:, :, -1, :] = filtered_core_logits
+    return filtered_edit_logits

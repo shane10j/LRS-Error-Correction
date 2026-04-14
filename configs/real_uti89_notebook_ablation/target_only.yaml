@@ -4,7 +4,7 @@ model:
   num_layers: 1
   ff_mult: 2
   dropout: 0.1
-  support_feature_dim: 8
+  support_feature_dim: 12
   max_supports: 8
   max_insertions_per_pos: 2
   conv_kernel_size: 5
@@ -40,7 +40,7 @@ loss:
   lambda_insertion_count: 0.2
   lambda_trust: 0.1
   lambda_hard_edit: 0.2
-  lambda_support: 0.2
+  lambda_support: 0.0
   lambda_preserve: 0.15
   lambda_uncertainty: 0.1
   homopolymer_weight_scale: 0.15

@@ -13,10 +13,12 @@ from torch.utils.data import DataLoader
 
 from omega_longread.config import OmegaConfig
 from omega_longread.dataset import LongReadDataset, collate_long_reads
+from omega_longread.decode import filter_low_confidence_hard_edits
 from omega_longread.losses import OmegaLoss, resolve_edit_class_weights, summarize_edit_class_weights
 from omega_longread.metrics import (
     aggregate_metric_dicts,
     estimate_overcorrection,
+    summarize_hard_edit_precision_stratified,
     summarize_edit_predictions,
     summarize_sequence_predictions,
     summarize_support_trust,
@@ -70,6 +72,13 @@ def compute_checkpoint_score(metrics: Dict[str, float], cfg: OmegaConfig) -> flo
     return metrics[metric]
 
 
+def get_metric_logits(outputs, cfg: OmegaConfig):
+    return filter_low_confidence_hard_edits(
+        outputs["edit_logits"].detach(),
+        min_hard_edit_confidence=cfg.model.inference_hard_edit_confidence_threshold,
+    )
+
+
 def train_epoch(
     model: OmegaModel,
     loader: DataLoader,
@@ -93,10 +102,11 @@ def train_epoch(
         scaler.step(optimizer)
         scaler.update()
 
-        row.update(summarize_edit_predictions(outputs["edit_logits"].detach(), batch.edit_labels))
+        metric_logits = get_metric_logits(outputs, cfg)
+        row.update(summarize_edit_predictions(metric_logits, batch.edit_labels))
         row.update(
             summarize_sequence_predictions(
-                outputs["edit_logits"].detach(),
+                metric_logits,
                 batch.edit_labels,
                 batch.target_bases,
                 batch.target_mask,
@@ -104,6 +114,8 @@ def train_epoch(
                 batch.metadata,
                 cfg.model.max_insertions_per_pos,
                 support_base_support=batch.support_base_support,
+                support_del_mask=batch.support_del_mask,
+                support_ins_base_support=batch.support_ins_base_support,
                 trust_gate=outputs["trust_gate"].detach(),
             )
         )
@@ -111,12 +123,24 @@ def train_epoch(
             summarize_support_trust(
                 outputs["trust_gate"].detach(),
                 batch.support_base_support,
+                batch.support_del_mask,
+                batch.support_ins_base_support,
                 batch.target_run_lengths,
                 batch.target_mask,
             )
         )
+        row.update(
+            summarize_hard_edit_precision_stratified(
+                metric_logits.argmax(dim=-1),
+                batch.edit_labels,
+                batch.target_run_lengths,
+                batch.support_base_support,
+                batch.support_del_mask,
+                batch.support_ins_base_support,
+            )
+        )
         row["overcorrection_rate"] = estimate_overcorrection(
-            outputs["edit_logits"].detach(), batch.preserve_mask, batch.edit_labels
+            metric_logits, batch.preserve_mask, batch.edit_labels
         )
         metric_rows.append(row)
 
@@ -141,10 +165,11 @@ def evaluate(
         with autocast(enabled=cfg.train.mixed_precision):
             outputs = model(batch)
             _, row = criterion(outputs, batch)
-        row.update(summarize_edit_predictions(outputs["edit_logits"], batch.edit_labels))
+        metric_logits = get_metric_logits(outputs, cfg)
+        row.update(summarize_edit_predictions(metric_logits, batch.edit_labels))
         row.update(
             summarize_sequence_predictions(
-                outputs["edit_logits"],
+                metric_logits,
                 batch.edit_labels,
                 batch.target_bases,
                 batch.target_mask,
@@ -152,6 +177,8 @@ def evaluate(
                 batch.metadata,
                 cfg.model.max_insertions_per_pos,
                 support_base_support=batch.support_base_support,
+                support_del_mask=batch.support_del_mask,
+                support_ins_base_support=batch.support_ins_base_support,
                 trust_gate=outputs["trust_gate"],
             )
         )
@@ -159,11 +186,23 @@ def evaluate(
             summarize_support_trust(
                 outputs["trust_gate"],
                 batch.support_base_support,
+                batch.support_del_mask,
+                batch.support_ins_base_support,
                 batch.target_run_lengths,
                 batch.target_mask,
             )
         )
-        row["overcorrection_rate"] = estimate_overcorrection(outputs["edit_logits"], batch.preserve_mask, batch.edit_labels)
+        row.update(
+            summarize_hard_edit_precision_stratified(
+                metric_logits.argmax(dim=-1),
+                batch.edit_labels,
+                batch.target_run_lengths,
+                batch.support_base_support,
+                batch.support_del_mask,
+                batch.support_ins_base_support,
+            )
+        )
+        row["overcorrection_rate"] = estimate_overcorrection(metric_logits, batch.preserve_mask, batch.edit_labels)
         metric_rows.append(row)
     return aggregate_metric_dicts(metric_rows)
 

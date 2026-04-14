@@ -29,15 +29,26 @@ _SUB_TOKEN_TO_BASE_ID = {
 }
 
 
-def _edit_to_base_distribution(edit_logits: torch.Tensor) -> torch.Tensor:
-    device = edit_logits.device
-    sub_ids = _SUB_IDS.to(device)
-    ins_ids = _INS_IDS.to(device)
-
-    probs = F.softmax(edit_logits, dim=-1)
-    base_probs = probs.index_select(dim=-1, index=sub_ids) + probs.index_select(dim=-1, index=ins_ids)
-    total = base_probs.sum(dim=-1, keepdim=True).clamp_min(1e-8)
-    return base_probs / total
+def _support_core_distribution_to_edit_space(
+    base_counts: torch.Tensor,
+    del_counts: torch.Tensor,
+    noisy_base_ids: torch.Tensor,
+    edit_vocab_size: int,
+) -> torch.Tensor:
+    support_target = torch.zeros(
+        *base_counts.shape[:2],
+        edit_vocab_size,
+        device=base_counts.device,
+        dtype=base_counts.dtype,
+    )
+    support_target[..., EDIT_TO_ID["DEL"]] = del_counts
+    for base_id, base_char in enumerate("ACGT"):
+        counts = base_counts[..., base_id]
+        copy_mask = noisy_base_ids == base_id
+        support_target[..., _COPY_ID] += counts * copy_mask.float()
+        support_target[..., EDIT_TO_ID[f"SUB_{base_char}"]] += counts * (~copy_mask).float()
+    total = support_target.sum(dim=-1, keepdim=True).clamp_min(1.0)
+    return support_target / total
 
 
 def _edit_logits_to_emission_log_probs(
@@ -170,12 +181,19 @@ class OmegaLoss:
         ) / target_lengths_float.clamp_min(1.0)
         insertion_count_loss = insertion_count_error.mean()
 
-        support_stats = compute_support_statistics(batch.support_base_support)
-        support_counts = support_stats["counts"]
-        support_mass = support_stats["depth"]
+        support_stats = compute_support_statistics(
+            batch.support_base_support,
+            batch.support_del_mask,
+            batch.support_ins_base_support,
+        )
         support_mask = support_stats["mask"]
-        support_target = support_counts / support_mass.unsqueeze(-1).clamp_min(1.0)
-        model_support = _edit_to_base_distribution(core_logits)
+        support_target = _support_core_distribution_to_edit_space(
+            support_stats["base_counts"],
+            support_stats["del_counts"],
+            batch.target_bases,
+            edit_vocab_size=core_logits.shape[-1],
+        )
+        model_support = core_probs
         support_loss_per_pos = F.kl_div(
             model_support.clamp_min(1e-8).log(),
             support_target.clamp_min(1e-8),
@@ -197,9 +215,20 @@ class OmegaLoss:
             dim=-1,
             index=_SUB_IDS.to(core_probs.device),
         ).sum(dim=-1)
+        entropy_excess = torch.relu(
+            support_stats["entropy"] - self.cfg.hard_edit_entropy_threshold
+        ) / max(1.0 - self.cfg.hard_edit_entropy_threshold, 1e-6)
+        agreement_deficit = torch.relu(
+            self.cfg.hard_edit_agreement_threshold - support_stats["agreement"]
+        ) / max(self.cfg.hard_edit_agreement_threshold, 1e-6)
         unsupported_hard_edit_weight = torch.pow(
             support_stats["uncertainty"].clamp(0.0, 1.0),
             self.cfg.hard_edit_uncertainty_power,
+        )
+        unsupported_hard_edit_weight = unsupported_hard_edit_weight * (
+            1.0
+            + self.cfg.hard_edit_entropy_scale * entropy_excess
+            + self.cfg.hard_edit_low_agreement_scale * agreement_deficit
         )
         hard_edit_loss = (
             hard_edit_prob
@@ -212,6 +241,8 @@ class OmegaLoss:
             | (batch.edit_labels[:, :, -1].unsqueeze(-1) == _SUB_IDS.to(batch.edit_labels.device)).any(dim=-1)
         )
         selective_mask = (
+            support_stats["agreement"] >= self.cfg.selective_hard_edit_min_support_agreement
+        ) & (
             support_stats["confidence"] >= self.cfg.selective_hard_edit_confidence_threshold
         ) & (
             support_stats["uncertainty"] <= self.cfg.selective_hard_edit_uncertainty_threshold
@@ -225,6 +256,28 @@ class OmegaLoss:
         selective_hard_edit_loss = (
             selective_hard_edit_ce * selective_mask.float()
         ).sum() / selective_mask.float().sum().clamp_min(1.0)
+
+        hard_edit_target = hard_edit_label_mask.float()
+        hard_edit_precision_weight = torch.where(
+            hard_edit_label_mask,
+            torch.full_like(hard_edit_target, self.cfg.hard_edit_false_negative_weight),
+            torch.full_like(hard_edit_target, self.cfg.hard_edit_false_positive_weight),
+        )
+        hard_edit_precision_weight = hard_edit_precision_weight * (
+            1.0
+            + self.cfg.hard_edit_entropy_scale * entropy_excess
+            + self.cfg.hard_edit_low_agreement_scale * agreement_deficit
+        )
+        hard_edit_precision_loss = F.binary_cross_entropy(
+            hard_edit_prob.clamp(1e-6, 1.0 - 1e-6),
+            hard_edit_target,
+            reduction="none",
+        )
+        hard_edit_precision_loss = (
+            hard_edit_precision_loss
+            * hard_edit_precision_weight
+            * core_valid_mask.float()
+        ).sum() / core_valid_mask.float().sum().clamp_min(1.0)
 
         preserve_labels = batch.preserve_mask
         preserve_penalty = 1.0 - core_probs[..., _COPY_ID]
@@ -246,6 +299,7 @@ class OmegaLoss:
             + self.cfg.lambda_insertion_count * insertion_count_loss
             + self.cfg.lambda_trust * trust_loss
             + self.cfg.lambda_hard_edit * hard_edit_loss
+            + self.cfg.lambda_hard_edit_precision * hard_edit_precision_loss
             + self.cfg.lambda_selective_hard_edit * selective_hard_edit_loss
             + self.cfg.lambda_support * support_loss
             + self.cfg.lambda_preserve * preserve_loss
@@ -259,7 +313,10 @@ class OmegaLoss:
             "insertion_count_loss": float(insertion_count_loss.detach().cpu()),
             "trust_loss": float(trust_loss.detach().cpu()),
             "hard_edit_loss": float(hard_edit_loss.detach().cpu()),
+            "hard_edit_precision_loss": float(hard_edit_precision_loss.detach().cpu()),
             "selective_hard_edit_loss": float(selective_hard_edit_loss.detach().cpu()),
+            "hard_edit_entropy_excess_mean": float(entropy_excess.mean().detach().cpu()),
+            "hard_edit_agreement_deficit_mean": float(agreement_deficit.mean().detach().cpu()),
             "support_loss": float(support_loss.detach().cpu()),
             "preserve_loss": float(preserve_loss.detach().cpu()),
             "uncertainty_loss": float(uncertainty_loss.detach().cpu()),

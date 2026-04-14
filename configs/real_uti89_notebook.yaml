@@ -4,11 +4,17 @@ model:
   num_layers: 1
   ff_mult: 2
   dropout: 0.1
-  support_feature_dim: 8
+  support_feature_dim: 12
   max_supports: 8
   max_insertions_per_pos: 2
   conv_kernel_size: 5
   support_mode: full
+  apply_hard_edit_support_filter: true
+  hard_edit_min_support_agreement: 0.93
+  hard_edit_max_support_entropy: 0.2
+  hard_edit_min_support_depth: 2.0
+  hard_edit_filter_logit_bias: 5.0
+  inference_hard_edit_confidence_threshold: 0.8
 data:
   train_path: data/real_uti89_notebook/train.jsonl
   val_path: data/real_uti89_notebook/val.jsonl
@@ -31,17 +37,18 @@ train:
   save_dir: checkpoints/real_uti89_notebook
   checkpoint_metric: composite_sequence
   checkpoint_metric_mode: max
-  checkpoint_overcorrection_weight: 0.5
-  checkpoint_length_ratio_weight: 0.35
+  checkpoint_overcorrection_weight: 2.0
+  checkpoint_length_ratio_weight: 0.25
 loss:
   lambda_edit: 1.0
   lambda_sequence: 0.5
   lambda_length: 0.3
   lambda_insertion_count: 0.2
   lambda_trust: 0.1
-  lambda_hard_edit: 0.2
+  lambda_hard_edit: 0.4
+  lambda_hard_edit_precision: 0.5
   lambda_selective_hard_edit: 0.2
-  lambda_support: 0.2
+  lambda_support: 0.0
   lambda_preserve: 0.15
   lambda_uncertainty: 0.1
   homopolymer_weight_scale: 0.15
@@ -55,6 +62,13 @@ loss:
   substitution_loss_scale: 1.75
   deletion_loss_scale: 1.25
   insertion_loss_scale: 1.1
-  hard_edit_uncertainty_power: 1.0
+  hard_edit_uncertainty_power: 2.0
+  hard_edit_entropy_threshold: 0.2
+  hard_edit_agreement_threshold: 0.93
+  hard_edit_entropy_scale: 2.0
+  hard_edit_low_agreement_scale: 3.0
+  hard_edit_false_positive_weight: 6.0
+  hard_edit_false_negative_weight: 1.0
   selective_hard_edit_confidence_threshold: 0.6
   selective_hard_edit_uncertainty_threshold: 0.4
+  selective_hard_edit_min_support_agreement: 0.9

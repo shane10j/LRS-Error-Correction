@@ -84,15 +84,19 @@ class SequenceEncoder(nn.Module):
 
 
 class OverlapAggregator(nn.Module):
-    def __init__(self, d_model: int, num_heads: int, dropout: float) -> None:
+    def __init__(self, d_model: int, dropout: float, support_feature_dim: int) -> None:
         super().__init__()
-        self.cross_attn = nn.MultiheadAttention(d_model, num_heads, dropout=dropout, batch_first=True)
-        self.ln_q = nn.LayerNorm(d_model)
-        self.ln_kv = nn.LayerNorm(d_model)
+        self.target_ln = nn.LayerNorm(d_model)
+        self.support_ln = nn.LayerNorm(d_model)
         self.out_ln = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
+        self.score = nn.Sequential(
+            nn.Linear(2 * d_model, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, 1),
+        )
         self.gate = nn.Sequential(
-            nn.Linear(2 * d_model + 3, d_model),
+            nn.Linear(2 * d_model + support_feature_dim, d_model),
             nn.GELU(),
             nn.Linear(d_model, 1),
             nn.Sigmoid(),
@@ -105,12 +109,19 @@ class OverlapAggregator(nn.Module):
         support_token_mask: torch.Tensor,
         support_features: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        batch, num_support, support_len, d_model = support_hidden.shape
-        support_flat = support_hidden.view(batch, num_support * support_len, d_model)
-        support_mask_flat = support_token_mask.view(batch, num_support * support_len)
-        q = self.ln_q(target_hidden)
-        kv = self.ln_kv(support_flat)
-        attn_out, _ = self.cross_attn(q, kv, kv, key_padding_mask=~support_mask_flat)
-        gate = self.gate(torch.cat([target_hidden, attn_out, support_features], dim=-1))
-        fused = gate * attn_out + (1.0 - gate) * target_hidden
+        target_hidden = self.target_ln(target_hidden)
+        support_hidden = self.support_ln(support_hidden)
+        target_expanded = target_hidden.unsqueeze(1).expand(-1, support_hidden.shape[1], -1, -1)
+        score_input = torch.cat([target_expanded, support_hidden], dim=-1)
+        support_scores = self.score(score_input).squeeze(-1)
+        support_scores = support_scores.masked_fill(~support_token_mask, -1e4)
+        support_weights = torch.softmax(support_scores, dim=1)
+        support_weights = support_weights * support_token_mask.float()
+        support_weight_norm = support_weights.sum(dim=1, keepdim=True).clamp_min(1e-8)
+        support_weights = support_weights / support_weight_norm
+        support_summary = (support_weights.unsqueeze(-1) * support_hidden).sum(dim=1)
+        no_support = ~support_token_mask.any(dim=1)
+        support_summary = support_summary * (~no_support).unsqueeze(-1)
+        gate = self.gate(torch.cat([target_hidden, support_summary, support_features], dim=-1))
+        fused = gate * support_summary + (1.0 - gate) * target_hidden
         return self.out_ln(target_hidden + self.dropout(fused)), gate.squeeze(-1)

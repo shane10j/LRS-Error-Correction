@@ -36,7 +36,7 @@ class SupportProjection:
     base_by_ref: Dict[int, str]
     qual_by_ref: Dict[int, int]
     deleted_ref_positions: set[int]
-    insertion_before_ref: set[int]
+    insertion_bases_by_ref: Dict[int, List[str]]
 
 
 class IntervalLookup:
@@ -136,6 +136,21 @@ def one_hot_base(base: str) -> List[float]:
     if base == "T":
         return [0.0, 0.0, 0.0, 1.0]
     return [0.0, 0.0, 0.0, 0.0]
+
+
+def base_count_vector(bases: Sequence[str]) -> List[float]:
+    counts = [0.0, 0.0, 0.0, 0.0]
+    for base in bases:
+        base = normalize_base(base)
+        if base == "A":
+            counts[0] += 1.0
+        elif base == "C":
+            counts[1] += 1.0
+        elif base == "G":
+            counts[2] += 1.0
+        elif base == "T":
+            counts[3] += 1.0
+    return counts
 
 
 def _pad_insertion_labels(tokens: List[int], max_insertions_per_pos: int) -> List[int]:
@@ -242,12 +257,19 @@ def build_support_projection(aln: pysam.AlignedSegment) -> SupportProjection | N
     quals = list(aln.query_qualities or [0] * len(query))
     q_idx = 0
     r_idx = aln.reference_start
-    pending_insertion = False
+    pending_insertion_bases: List[str] = []
 
     base_by_ref: Dict[int, str] = {}
     qual_by_ref: Dict[int, int] = {}
     deleted_ref_positions: set[int] = set()
-    insertion_before_ref: set[int] = set()
+    insertion_bases_by_ref: Dict[int, List[str]] = defaultdict(list)
+
+    def flush_pending_insertion(anchor_ref_pos: int) -> None:
+        nonlocal pending_insertion_bases
+        if not pending_insertion_bases:
+            return
+        insertion_bases_by_ref[anchor_ref_pos].extend(pending_insertion_bases)
+        pending_insertion_bases = []
 
     for op, length in aln.cigartuples:
         if op in _QUERY_CLIP_OPS:
@@ -255,23 +277,20 @@ def build_support_projection(aln: pysam.AlignedSegment) -> SupportProjection | N
             continue
         if op in _MATCH_OPS:
             for _ in range(length):
-                if pending_insertion:
-                    insertion_before_ref.add(r_idx)
-                    pending_insertion = False
+                flush_pending_insertion(r_idx)
                 base_by_ref[r_idx] = normalize_base(query[q_idx])
                 qual_by_ref[r_idx] = cap_quality(quals[q_idx])
                 q_idx += 1
                 r_idx += 1
             continue
         if op in _QUERY_GAP_OPS:
-            pending_insertion = True
-            q_idx += length
+            for _ in range(length):
+                pending_insertion_bases.append(normalize_base(query[q_idx]))
+                q_idx += 1
             continue
         if op in _REF_GAP_OPS:
             for _ in range(length):
-                if pending_insertion:
-                    insertion_before_ref.add(r_idx)
-                    pending_insertion = False
+                flush_pending_insertion(r_idx)
                 deleted_ref_positions.add(r_idx)
                 r_idx += 1
             continue
@@ -285,7 +304,7 @@ def build_support_projection(aln: pysam.AlignedSegment) -> SupportProjection | N
         base_by_ref=base_by_ref,
         qual_by_ref=qual_by_ref,
         deleted_ref_positions=deleted_ref_positions,
-        insertion_before_ref=insertion_before_ref,
+        insertion_bases_by_ref=dict(insertion_bases_by_ref),
     )
 
 
@@ -328,6 +347,7 @@ def project_support_onto_window(
     support_ins_mask: List[int] = []
     support_del_mask: List[int] = []
     support_base_support: List[List[float]] = []
+    support_ins_base_support: List[List[float]] = []
 
     for ref_pos, target_base in zip(window_ref_positions, target_window_bases):
         if ref_pos is None:
@@ -337,9 +357,12 @@ def project_support_onto_window(
             support_ins_mask.append(0)
             support_del_mask.append(0)
             support_base_support.append([0.0, 0.0, 0.0, 0.0])
+            support_ins_base_support.append([0.0, 0.0, 0.0, 0.0])
             continue
 
-        support_ins_mask.append(int(ref_pos in projection.insertion_before_ref))
+        inserted_bases = projection.insertion_bases_by_ref.get(ref_pos, [])
+        support_ins_mask.append(int(bool(inserted_bases)))
+        support_ins_base_support.append(base_count_vector(inserted_bases))
         if ref_pos in projection.base_by_ref:
             base = projection.base_by_ref[ref_pos]
             support_chars.append(base)
@@ -368,6 +391,7 @@ def project_support_onto_window(
         "support_ins_mask": support_ins_mask,
         "support_del_mask": support_del_mask,
         "support_base_support": support_base_support,
+        "support_ins_base_support": support_ins_base_support,
     }
 
 
@@ -375,6 +399,7 @@ def infer_uncertainty_labels(
     contig: str,
     window_ref_positions: Sequence[int | None],
     support_base_support: Sequence[Sequence[Sequence[float]]],
+    support_del_mask: Sequence[Sequence[int]],
     variant_positions: set[int],
     disagreement_threshold: float,
     min_support_depth: int,
@@ -386,12 +411,16 @@ def infer_uncertainty_labels(
     for i in range(num_positions):
         ref_pos = window_ref_positions[i]
         counts = [0.0, 0.0, 0.0, 0.0]
+        del_count = 0.0
         for support_dist in support_base_support:
             pos_dist = support_dist[i]
             for j in range(4):
                 counts[j] += pos_dist[j]
-        depth = int(sum(counts))
-        top_fraction = max(counts) / depth if depth else 0.0
+        for del_row in support_del_mask:
+            del_count += float(del_row[i])
+        core_counts = counts + [del_count]
+        depth = int(sum(core_counts))
+        top_fraction = max(core_counts) / depth if depth else 0.0
         is_variant = ref_pos is not None and ref_pos in variant_positions
 
         if is_variant:
@@ -443,6 +472,7 @@ def build_window_example(
     window_start: int,
     window_end: int,
     max_supports: int,
+    min_supports_per_window: int,
     min_mapq: int,
     min_confident_fraction: float,
     min_mapped_fraction: float,
@@ -477,6 +507,7 @@ def build_window_example(
     target_window_bases = read_encoding.target_bases[window_start:window_end]
     support_rows = []
     support_base_support = []
+    support_del_masks = []
     for aln in support_alignments:
         projection = build_support_projection(aln)
         if projection is None:
@@ -484,7 +515,8 @@ def build_window_example(
         row = project_support_onto_window(projection, window_ref_positions, target_window_bases)
         support_rows.append(row)
         support_base_support.append(row["support_base_support"])
-    if not support_rows:
+        support_del_masks.append(row["support_del_mask"])
+    if len(support_rows) < min_supports_per_window:
         return None
 
     variant_positions = variant_lookup.positions(read_encoding.contig, window_ref_start, window_ref_end)
@@ -492,6 +524,7 @@ def build_window_example(
         contig=read_encoding.contig,
         window_ref_positions=window_ref_positions,
         support_base_support=support_base_support,
+        support_del_mask=support_del_masks,
         variant_positions=variant_positions,
         disagreement_threshold=support_disagreement_threshold,
         min_support_depth=min_support_depth,
@@ -516,6 +549,7 @@ def build_window_example(
         "support_del_mask": [row["support_del_mask"] for row in support_rows],
         "support_qualities": [row["support_qualities"] for row in support_rows],
         "support_base_support": [row["support_base_support"] for row in support_rows],
+        "support_ins_base_support": [row["support_ins_base_support"] for row in support_rows],
         "target_sequence": apply_edit_ops(target_window_bases, window_edit_labels, max_insertions_per_pos=max_insertions_per_pos),
         "edit_labels": window_edit_labels,
         "preserve_mask": preserve_mask,
