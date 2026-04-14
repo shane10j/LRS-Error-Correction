@@ -1,0 +1,41 @@
+# Large datasets
+data/
+datasets/
+*.fastq
+*.fq
+*.fasta
+*.fa
+*.bam
+*.sam
+*.paf
+*.hdf5
+*.h5
+*.npz
+*.npy
+
+# Outputs / checkpoints
+outputs/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# Logs
+logs/
+*.log
+
+# Notebooks (optional, keep if you want)
+.ipynb_checkpoints/
+
+# Python
+__pycache__/
+*.pyc
+
+# Env
+.env
+venv/
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db

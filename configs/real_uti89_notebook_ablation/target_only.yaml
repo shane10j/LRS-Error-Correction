@@ -1,0 +1,57 @@
+model:
+  d_model: 32
+  num_heads: 4
+  num_layers: 1
+  ff_mult: 2
+  dropout: 0.1
+  support_feature_dim: 8
+  max_supports: 8
+  max_insertions_per_pos: 2
+  conv_kernel_size: 5
+  support_mode: target_only
+data:
+  train_path: data/real_uti89_notebook/train.jsonl
+  val_path: data/real_uti89_notebook/val.jsonl
+  test_path: data/real_uti89_notebook/test.jsonl
+  max_target_len: 1024
+  max_supports: 8
+  max_support_len: 1024
+  num_workers: 0
+train:
+  seed: 42
+  batch_size: 4
+  epochs: 5
+  lr: 0.0001
+  weight_decay: 0.01
+  grad_clip_norm: 0.5
+  device: cpu
+  mixed_precision: false
+  log_every: 20
+  eval_every: 1
+  save_dir: checkpoints/real_uti89_notebook_ablation/target_only
+  checkpoint_metric: composite_sequence
+  checkpoint_metric_mode: max
+  checkpoint_overcorrection_weight: 0.5
+  checkpoint_length_ratio_weight: 0.35
+loss:
+  lambda_edit: 1.0
+  lambda_sequence: 0.5
+  lambda_length: 0.3
+  lambda_insertion_count: 0.2
+  lambda_trust: 0.1
+  lambda_hard_edit: 0.2
+  lambda_support: 0.2
+  lambda_preserve: 0.15
+  lambda_uncertainty: 0.1
+  homopolymer_weight_scale: 0.15
+  label_smoothing: 0.0
+  edit_class_weights: []
+  auto_edit_class_weights: true
+  edit_class_weight_power: 1.0
+  edit_class_weight_count_smoothing: 1.0
+  edit_class_weight_min: 0.25
+  edit_class_weight_max: 8.0
+  substitution_loss_scale: 1.75
+  deletion_loss_scale: 1.25
+  insertion_loss_scale: 1.1
+  hard_edit_uncertainty_power: 1.0

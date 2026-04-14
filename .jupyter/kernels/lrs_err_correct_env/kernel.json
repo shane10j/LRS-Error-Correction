@@ -1,0 +1,12 @@
+{
+  "argv": [
+    "/Users/shanejayasundera/anaconda3/envs/lrs_err_correct_env/bin/python",
+    "-m",
+    "ipykernel_launcher",
+    "-f",
+    "{connection_file}"
+  ],
+  "display_name": "lrs_err_correct_env",
+  "language": "python",
+  "metadata": {}
+}

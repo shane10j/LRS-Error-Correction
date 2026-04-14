@@ -1,0 +1,63 @@
+model:
+  d_model: 256
+  num_heads: 8
+  num_layers: 6
+  ff_mult: 4
+  dropout: 0.1
+  support_feature_dim: 8
+  max_supports: 16
+  max_insertions_per_pos: 2
+  conv_kernel_size: 5
+  support_mode: full
+
+data:
+  train_path: data/train.jsonl
+  val_path: data/val.jsonl
+  test_path: data/test.jsonl
+  max_target_len: 1024
+  max_supports: 16
+  max_support_len: 1024
+  num_workers: 4
+
+train:
+  seed: 42
+  batch_size: 4
+  epochs: 20
+  lr: 0.0003
+  weight_decay: 0.01
+  grad_clip_norm: 1.0
+  device: cuda
+  mixed_precision: true
+  log_every: 20
+  eval_every: 1
+  save_dir: checkpoints
+  checkpoint_metric: loss
+  checkpoint_metric_mode: min
+  checkpoint_overcorrection_weight: 0.5
+  checkpoint_length_ratio_weight: 0.25
+
+loss:
+  lambda_edit: 1.0
+  lambda_sequence: 0.0
+  lambda_length: 0.0
+  lambda_insertion_count: 0.0
+  lambda_trust: 0.0
+  lambda_hard_edit: 0.0
+  lambda_selective_hard_edit: 0.0
+  lambda_support: 0.2
+  lambda_preserve: 0.15
+  lambda_uncertainty: 0.1
+  homopolymer_weight_scale: 0.15
+  label_smoothing: 0.0
+  edit_class_weights: []
+  auto_edit_class_weights: false
+  edit_class_weight_power: 1.0
+  edit_class_weight_count_smoothing: 1.0
+  edit_class_weight_min: 0.25
+  edit_class_weight_max: 8.0
+  substitution_loss_scale: 1.0
+  deletion_loss_scale: 1.0
+  insertion_loss_scale: 1.0
+  hard_edit_uncertainty_power: 1.0
+  selective_hard_edit_confidence_threshold: 0.6
+  selective_hard_edit_uncertainty_threshold: 0.4
