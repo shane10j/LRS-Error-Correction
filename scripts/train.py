@@ -76,6 +76,7 @@ def get_metric_logits(outputs, cfg: OmegaConfig):
     return filter_low_confidence_hard_edits(
         outputs["edit_logits"].detach(),
         min_hard_edit_confidence=cfg.model.inference_hard_edit_confidence_threshold,
+        hard_edit_temperature=cfg.model.inference_hard_edit_temperature,
     )
 
 

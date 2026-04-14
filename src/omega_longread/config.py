@@ -26,6 +26,7 @@ class ModelConfig:
     hard_edit_min_support_depth: float = 2.0
     hard_edit_filter_logit_bias: float = 3.0
     inference_hard_edit_confidence_threshold: float = 0.0
+    inference_hard_edit_temperature: float = 1.0
 
 
 @dataclass
@@ -87,7 +88,7 @@ class LossConfig:
     hard_edit_agreement_threshold: float = 0.85
     hard_edit_entropy_scale: float = 1.0
     hard_edit_low_agreement_scale: float = 1.0
-    hard_edit_false_positive_weight: float = 4.0
+    hard_edit_false_positive_weight: float = 6.0
     hard_edit_false_negative_weight: float = 1.0
     selective_hard_edit_confidence_threshold: float = 0.6
     selective_hard_edit_uncertainty_threshold: float = 0.4

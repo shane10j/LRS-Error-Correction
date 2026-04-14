@@ -55,11 +55,13 @@ def apply_edit_ops(noisy_bases: str, edit_ids: Iterable[int] | Iterable[Iterable
 def filter_low_confidence_hard_edits(
     edit_logits: torch.Tensor,
     min_hard_edit_confidence: float = 0.0,
+    hard_edit_temperature: float = 1.0,
 ) -> torch.Tensor:
-    if min_hard_edit_confidence <= 0.0:
+    if min_hard_edit_confidence <= 0.0 and abs(hard_edit_temperature - 1.0) < 1e-8:
         return edit_logits
     core_logits = edit_logits[:, :, -1, :]
-    core_probs = torch.softmax(core_logits, dim=-1)
+    temperature = max(float(hard_edit_temperature), 1e-4)
+    core_probs = torch.softmax(core_logits / temperature, dim=-1)
     pred_confidence, pred_ids = core_probs.max(dim=-1)
     hard_edit_mask = torch.zeros_like(pred_ids, dtype=torch.bool)
     for token_id in _CORE_HARD_EDIT_IDS:

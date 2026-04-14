@@ -84,6 +84,7 @@ def evaluate() -> None:
         metric_logits = filter_low_confidence_hard_edits(
             outputs["edit_logits"].detach(),
             min_hard_edit_confidence=cfg.model.inference_hard_edit_confidence_threshold,
+            hard_edit_temperature=cfg.model.inference_hard_edit_temperature,
         )
         row.update(summarize_edit_predictions(metric_logits, batch.edit_labels))
         row.update(
