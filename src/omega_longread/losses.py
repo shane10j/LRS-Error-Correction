@@ -112,6 +112,56 @@ def _build_label_scaling(labels: torch.Tensor, cfg: LossConfig) -> torch.Tensor:
     return scale
 
 
+def _ctc_loss_with_device_fallback(
+    emit_log_probs: torch.Tensor,
+    flat_targets: torch.Tensor,
+    input_lengths: torch.Tensor,
+    target_lengths: torch.Tensor,
+) -> torch.Tensor:
+    if flat_targets.numel() == 0:
+        return emit_log_probs.new_zeros(())
+    if emit_log_probs.device.type != "mps":
+        return F.ctc_loss(
+            emit_log_probs,
+            flat_targets,
+            input_lengths,
+            target_lengths,
+            blank=_BASE_EMIT_BLANK_ID,
+            reduction="mean",
+            zero_infinity=True,
+        )
+
+    # PyTorch does not currently implement CTC on MPS. Compute the loss on CPU
+    # and move the scalar back so the rest of training can stay on MPS.
+    return F.ctc_loss(
+        emit_log_probs.float().cpu(),
+        flat_targets.cpu(),
+        input_lengths.cpu(),
+        target_lengths.cpu(),
+        blank=_BASE_EMIT_BLANK_ID,
+        reduction="mean",
+        zero_infinity=True,
+    ).to(device=emit_log_probs.device, dtype=emit_log_probs.dtype)
+
+
+def _binary_focal_loss_with_logits(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    pos_weight: float,
+    neg_weight: float,
+    gamma: float,
+) -> torch.Tensor:
+    probs = torch.sigmoid(logits)
+    bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+    pt = torch.where(targets > 0.5, probs, 1.0 - probs)
+    alpha = torch.where(
+        targets > 0.5,
+        torch.full_like(targets, float(pos_weight)),
+        torch.full_like(targets, float(neg_weight)),
+    )
+    return alpha * torch.pow((1.0 - pt).clamp_min(1e-6), float(gamma)) * bce
+
+
 class OmegaLoss:
     def __init__(self, cfg: LossConfig, edit_class_weights: torch.Tensor | None = None) -> None:
         self.cfg = cfg
@@ -150,18 +200,12 @@ class OmegaLoss:
         input_lengths = batch.target_mask.sum(dim=-1).to(dtype=torch.long) * outputs["edit_logits"].shape[2]
         target_lengths = batch.target_sequence_mask.sum(dim=-1).to(dtype=torch.long)
         flat_targets = batch.target_sequence_ids[batch.target_sequence_mask]
-        if flat_targets.numel() > 0:
-            sequence_loss = F.ctc_loss(
-                emit_log_probs,
-                flat_targets,
-                input_lengths,
-                target_lengths,
-                blank=_BASE_EMIT_BLANK_ID,
-                reduction="mean",
-                zero_infinity=True,
-            )
-        else:
-            sequence_loss = outputs["edit_logits"].new_zeros(())
+        sequence_loss = _ctc_loss_with_device_fallback(
+            emit_log_probs,
+            flat_targets,
+            input_lengths,
+            target_lengths,
+        )
 
         predicted_lengths = nonblank_probs.sum(dim=(-1, -2))
         target_lengths_float = target_lengths.float()
@@ -185,6 +229,8 @@ class OmegaLoss:
             batch.support_base_support,
             batch.support_del_mask,
             batch.support_ins_base_support,
+            batch.support_haplotype,
+            batch.support_same_haplotype,
         )
         support_mask = support_stats["mask"]
         support_target = _support_core_distribution_to_edit_space(
@@ -292,6 +338,52 @@ class OmegaLoss:
         )
         uncertainty_loss = (uncertainty_loss * core_valid_mask.float()).sum() / core_valid_mask.float().sum().clamp_min(1.0)
 
+        deletion_candidate_logits = outputs["deletion_candidate_logits"]
+        deletion_candidate_targets = batch.deletion_candidate_labels.float()
+        deletion_candidate_loss_map = _binary_focal_loss_with_logits(
+            deletion_candidate_logits,
+            deletion_candidate_targets,
+            pos_weight=self.cfg.deletion_false_negative_weight,
+            neg_weight=self.cfg.deletion_false_positive_weight,
+            gamma=self.cfg.deletion_focal_gamma,
+        )
+        deletion_candidate_loss = (
+            deletion_candidate_loss_map * core_valid_mask.float()
+        ).sum() / core_valid_mask.float().sum().clamp_min(1.0)
+
+        deletion_length_loss_map = F.cross_entropy(
+            outputs["deletion_length_logits"].transpose(1, 2),
+            batch.deletion_length_labels,
+            reduction="none",
+        )
+        deletion_start_mask = deletion_candidate_targets * core_valid_mask.float()
+        deletion_length_loss = (
+            deletion_length_loss_map * deletion_start_mask
+        ).sum() / deletion_start_mask.sum().clamp_min(1.0)
+
+        confident_deletion_mask = (
+            deletion_candidate_targets.bool()
+            & (support_stats["agreement"] >= self.cfg.selective_hard_edit_min_support_agreement)
+            & (support_stats["entropy"] <= self.cfg.selective_hard_edit_uncertainty_threshold)
+            & core_valid_mask
+        )
+        deletion_positive_reward_loss = (
+            (1.0 - torch.sigmoid(deletion_candidate_logits))
+            * confident_deletion_mask.float()
+            * self.cfg.deletion_positive_reward_scale
+        ).sum() / confident_deletion_mask.float().sum().clamp_min(1.0)
+
+        run_length_targets = batch.target_run_lengths.clamp(max=outputs["run_length_logits"].shape[-1] - 1)
+        homopolymer_mask = (batch.target_run_lengths >= 4) & core_valid_mask
+        run_length_loss_map = F.cross_entropy(
+            outputs["run_length_logits"].transpose(1, 2),
+            run_length_targets,
+            reduction="none",
+        )
+        run_length_loss = (
+            run_length_loss_map * homopolymer_mask.float()
+        ).sum() / homopolymer_mask.float().sum().clamp_min(1.0)
+
         total = (
             self.cfg.lambda_edit * edit_loss
             + self.cfg.lambda_sequence * sequence_loss
@@ -301,6 +393,10 @@ class OmegaLoss:
             + self.cfg.lambda_hard_edit * hard_edit_loss
             + self.cfg.lambda_hard_edit_precision * hard_edit_precision_loss
             + self.cfg.lambda_selective_hard_edit * selective_hard_edit_loss
+            + self.cfg.lambda_deletion_candidate * deletion_candidate_loss
+            + self.cfg.lambda_deletion_length * deletion_length_loss
+            + self.cfg.lambda_run_length_aux * run_length_loss
+            + self.cfg.lambda_deletion_positive_reward * deletion_positive_reward_loss
             + self.cfg.lambda_support * support_loss
             + self.cfg.lambda_preserve * preserve_loss
             + self.cfg.lambda_uncertainty * uncertainty_loss
@@ -315,6 +411,10 @@ class OmegaLoss:
             "hard_edit_loss": float(hard_edit_loss.detach().cpu()),
             "hard_edit_precision_loss": float(hard_edit_precision_loss.detach().cpu()),
             "selective_hard_edit_loss": float(selective_hard_edit_loss.detach().cpu()),
+            "deletion_candidate_loss": float(deletion_candidate_loss.detach().cpu()),
+            "deletion_length_loss": float(deletion_length_loss.detach().cpu()),
+            "deletion_positive_reward_loss": float(deletion_positive_reward_loss.detach().cpu()),
+            "run_length_loss": float(run_length_loss.detach().cpu()),
             "hard_edit_entropy_excess_mean": float(entropy_excess.mean().detach().cpu()),
             "hard_edit_agreement_deficit_mean": float(agreement_deficit.mean().detach().cpu()),
             "support_loss": float(support_loss.detach().cpu()),

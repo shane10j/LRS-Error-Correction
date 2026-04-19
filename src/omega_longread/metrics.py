@@ -14,7 +14,7 @@ _COPY_ID = EDIT_TO_ID["COPY"]
 _DEL_ID = EDIT_TO_ID["DEL"]
 _SUB_IDS = {EDIT_TO_ID["SUB_A"], EDIT_TO_ID["SUB_C"], EDIT_TO_ID["SUB_G"], EDIT_TO_ID["SUB_T"]}
 _INS_IDS = {EDIT_TO_ID["INS_A"], EDIT_TO_ID["INS_C"], EDIT_TO_ID["INS_G"], EDIT_TO_ID["INS_T"]}
-_HOMOPOLYMER_THRESHOLD = 3
+_HOMOPOLYMER_THRESHOLD = 4
 _LOW_COMPLEXITY_THRESHOLD = 0.55
 _REPEAT_RICH_THRESHOLD = 0.45
 _LOW_SUPPORT_ENTROPY_THRESHOLD = 0.25
@@ -25,6 +25,12 @@ _HIGH_SUPPORT_AGREEMENT_THRESHOLD = 0.9
 
 def _decode_base_ids(ids: torch.Tensor) -> str:
     return "".join(ID_TO_BASE.get(int(token), "N") for token in ids.tolist())
+
+
+def _f1(precision: float, recall: float) -> float:
+    if precision + recall <= 0.0:
+        return 0.0
+    return 2.0 * precision * recall / (precision + recall)
 
 
 def levenshtein_distance(a: str, b: str) -> int:
@@ -97,6 +103,15 @@ def summarize_edit_label_predictions(preds: torch.Tensor, labels: torch.Tensor) 
         "edit_accuracy": float(accuracy.cpu()),
         "core_edit_accuracy": float(core_accuracy.cpu()),
     }
+    hard_edit_pred_mask = torch.zeros_like(pred_valid, dtype=torch.bool)
+    hard_edit_label_mask = torch.zeros_like(label_valid, dtype=torch.bool)
+    for token_id in _SUB_IDS | {_DEL_ID}:
+        hard_edit_pred_mask |= pred_valid == token_id
+        hard_edit_label_mask |= label_valid == token_id
+    hard_edit_false_positive = hard_edit_pred_mask & ~hard_edit_label_mask
+    out["hard_edit_false_positive_rate"] = float(
+        hard_edit_false_positive.sum().float().cpu() / max(int(pred_valid.numel()), 1)
+    )
     for name, token_id in [("copy", _COPY_ID), ("delete", _DEL_ID)]:
         denom = (label_valid == token_id).sum().clamp_min(1)
         rec = ((pred_valid == token_id) & (label_valid == token_id)).sum().float() / denom
@@ -104,6 +119,7 @@ def summarize_edit_label_predictions(preds: torch.Tensor, labels: torch.Tensor) 
         pred_denom = (pred_valid == token_id).sum().clamp_min(1)
         prec = ((pred_valid == token_id) & (label_valid == token_id)).sum().float() / pred_denom
         out[f"{name}_precision"] = float(prec.cpu())
+        out[f"{name}_f1"] = _f1(out[f"{name}_precision"], out[f"{name}_recall"])
 
     for name, token_ids, pred_tensor, label_tensor in [
         ("sub", _SUB_IDS, pred_valid, label_valid),
@@ -118,6 +134,7 @@ def summarize_edit_label_predictions(preds: torch.Tensor, labels: torch.Tensor) 
         prec = (pred_mask & label_mask).sum().float() / pred_mask.sum().clamp_min(1)
         out[f"{name}_recall"] = float(rec.cpu())
         out[f"{name}_precision"] = float(prec.cpu())
+        out[f"{name}_f1"] = _f1(out[f"{name}_precision"], out[f"{name}_recall"])
     return out
 
 
@@ -128,6 +145,9 @@ def summarize_hard_edit_precision_stratified(
     support_base_support: torch.Tensor,
     support_del_mask: torch.Tensor | None = None,
     support_ins_base_support: torch.Tensor | None = None,
+    region_masks: Dict[str, torch.Tensor] | None = None,
+    support_haplotype: torch.Tensor | None = None,
+    support_same_haplotype: torch.Tensor | None = None,
 ) -> Dict[str, float]:
     preds = preds.detach()
     labels = labels.detach()
@@ -136,6 +156,8 @@ def summarize_hard_edit_precision_stratified(
         support_base_support.detach(),
         None if support_del_mask is None else support_del_mask.detach(),
         None if support_ins_base_support is None else support_ins_base_support.detach(),
+        None if support_haplotype is None else support_haplotype.detach(),
+        None if support_same_haplotype is None else support_same_haplotype.detach(),
     )
 
     core_preds = preds[:, :, -1]
@@ -156,29 +178,22 @@ def summarize_hard_edit_precision_stratified(
     homopolymer_mask = target_run_lengths >= _HOMOPOLYMER_THRESHOLD
     non_homopolymer_mask = ~homopolymer_mask
 
-    def precision(pred_mask: torch.Tensor, label_mask: torch.Tensor, region_mask: torch.Tensor) -> float:
-        mask = pred_mask & region_mask & core_valid
-        if mask.sum() == 0:
-            return 0.0
-        correct = mask & label_mask
-        return float((correct.sum().float() / mask.sum().float()).cpu())
+    def precision_recall_f1(
+        pred_mask: torch.Tensor,
+        label_mask: torch.Tensor,
+        region_mask: torch.Tensor,
+    ) -> tuple[float, float, float]:
+        region_valid = region_mask & core_valid
+        pred_region = pred_mask & region_valid
+        label_region = label_mask & region_valid
+        precision = float(((pred_region & label_mask).sum().float() / pred_region.sum().clamp_min(1).float()).cpu())
+        recall = float(((pred_mask & label_region).sum().float() / label_region.sum().clamp_min(1).float()).cpu())
+        return precision, recall, _f1(precision, recall)
 
     def pred_count(pred_mask: torch.Tensor, region_mask: torch.Tensor) -> float:
         return float((pred_mask & region_mask & core_valid).sum().cpu())
 
     out = {
-        "sub_precision_low_entropy": precision(pred_sub_mask, label_sub_mask, low_entropy_mask),
-        "sub_precision_high_entropy": precision(pred_sub_mask, label_sub_mask, high_entropy_mask),
-        "sub_precision_low_agreement": precision(pred_sub_mask, label_sub_mask, low_agreement_mask),
-        "sub_precision_high_agreement": precision(pred_sub_mask, label_sub_mask, high_agreement_mask),
-        "sub_precision_homopolymer": precision(pred_sub_mask, label_sub_mask, homopolymer_mask),
-        "sub_precision_non_homopolymer": precision(pred_sub_mask, label_sub_mask, non_homopolymer_mask),
-        "delete_precision_low_entropy": precision(pred_del_mask, label_del_mask, low_entropy_mask),
-        "delete_precision_high_entropy": precision(pred_del_mask, label_del_mask, high_entropy_mask),
-        "delete_precision_low_agreement": precision(pred_del_mask, label_del_mask, low_agreement_mask),
-        "delete_precision_high_agreement": precision(pred_del_mask, label_del_mask, high_agreement_mask),
-        "delete_precision_homopolymer": precision(pred_del_mask, label_del_mask, homopolymer_mask),
-        "delete_precision_non_homopolymer": precision(pred_del_mask, label_del_mask, non_homopolymer_mask),
         "sub_pred_count_low_entropy": pred_count(pred_sub_mask, low_entropy_mask),
         "sub_pred_count_high_entropy": pred_count(pred_sub_mask, high_entropy_mask),
         "sub_pred_count_low_agreement": pred_count(pred_sub_mask, low_agreement_mask),
@@ -188,6 +203,57 @@ def summarize_hard_edit_precision_stratified(
         "delete_pred_count_low_agreement": pred_count(pred_del_mask, low_agreement_mask),
         "delete_pred_count_high_agreement": pred_count(pred_del_mask, high_agreement_mask),
     }
+    region_specs = {
+        "low_entropy": low_entropy_mask,
+        "high_entropy": high_entropy_mask,
+        "low_agreement": low_agreement_mask,
+        "high_agreement": high_agreement_mask,
+        "homopolymer": homopolymer_mask,
+        "non_homopolymer": non_homopolymer_mask,
+    }
+    pred_ins_mask = torch.zeros_like(preds[:, :, :-1], dtype=torch.bool)
+    label_ins_mask = torch.zeros_like(labels[:, :, :-1], dtype=torch.bool)
+    for token_id in _INS_IDS:
+        pred_ins_mask |= preds[:, :, :-1] == token_id
+        label_ins_mask |= labels[:, :, :-1] == token_id
+    ins_valid = labels[:, :, :-1].ne(PAD_EDIT_ID)
+    for name, mask in region_specs.items():
+        sub_p, sub_r, sub_f = precision_recall_f1(pred_sub_mask, label_sub_mask, mask)
+        del_p, del_r, del_f = precision_recall_f1(pred_del_mask, label_del_mask, mask)
+        ins_region_mask = mask.unsqueeze(-1).expand_as(pred_ins_mask) & ins_valid
+        ins_pred_region = pred_ins_mask & ins_region_mask
+        ins_label_region = label_ins_mask & ins_region_mask
+        ins_p = float(((ins_pred_region & label_ins_mask).sum().float() / ins_pred_region.sum().clamp_min(1).float()).cpu())
+        ins_r = float(((pred_ins_mask & ins_label_region).sum().float() / ins_label_region.sum().clamp_min(1).float()).cpu())
+        ins_f = _f1(ins_p, ins_r)
+        out[f"sub_precision_{name}"] = sub_p
+        out[f"sub_recall_{name}"] = sub_r
+        out[f"sub_f1_{name}"] = sub_f
+        out[f"delete_precision_{name}"] = del_p
+        out[f"delete_recall_{name}"] = del_r
+        out[f"delete_f1_{name}"] = del_f
+        out[f"ins_precision_{name}"] = ins_p
+        out[f"ins_recall_{name}"] = ins_r
+        out[f"ins_f1_{name}"] = ins_f
+    for region_name, region_mask in (region_masks or {}).items():
+        region_mask = region_mask.detach().bool()
+        sub_p, sub_r, sub_f = precision_recall_f1(pred_sub_mask, label_sub_mask, region_mask)
+        del_p, del_r, del_f = precision_recall_f1(pred_del_mask, label_del_mask, region_mask)
+        ins_region_mask = region_mask.unsqueeze(-1).expand_as(pred_ins_mask) & ins_valid
+        ins_pred_region = pred_ins_mask & ins_region_mask
+        ins_label_region = label_ins_mask & ins_region_mask
+        ins_p = float(((ins_pred_region & label_ins_mask).sum().float() / ins_pred_region.sum().clamp_min(1).float()).cpu())
+        ins_r = float(((pred_ins_mask & ins_label_region).sum().float() / ins_label_region.sum().clamp_min(1).float()).cpu())
+        ins_f = _f1(ins_p, ins_r)
+        out[f"sub_precision_{region_name}"] = sub_p
+        out[f"sub_recall_{region_name}"] = sub_r
+        out[f"sub_f1_{region_name}"] = sub_f
+        out[f"delete_precision_{region_name}"] = del_p
+        out[f"delete_recall_{region_name}"] = del_r
+        out[f"delete_f1_{region_name}"] = del_f
+        out[f"ins_precision_{region_name}"] = ins_p
+        out[f"ins_recall_{region_name}"] = ins_r
+        out[f"ins_f1_{region_name}"] = ins_f
     return out
 
 
@@ -204,9 +270,14 @@ def summarize_sequence_label_predictions(
     target_run_lengths: torch.Tensor,
     metadata: List[Dict[str, object]],
     max_insertions_per_pos: int,
+    variant_mask: torch.Tensor | None = None,
+    phased_variant_mask: torch.Tensor | None = None,
+    region_masks: Dict[str, torch.Tensor] | None = None,
     support_base_support: torch.Tensor | None = None,
     support_del_mask: torch.Tensor | None = None,
     support_ins_base_support: torch.Tensor | None = None,
+    support_haplotype: torch.Tensor | None = None,
+    support_same_haplotype: torch.Tensor | None = None,
     trust_gate: torch.Tensor | None = None,
 ) -> Dict[str, float]:
     preds = preds.detach().cpu()
@@ -214,6 +285,9 @@ def summarize_sequence_label_predictions(
     target_bases_cpu = target_bases.detach().cpu()
     target_mask_cpu = target_mask.detach().cpu()
     target_run_lengths_cpu = target_run_lengths.detach().cpu()
+    variant_mask_cpu = variant_mask.detach().cpu() if variant_mask is not None else None
+    phased_variant_mask_cpu = phased_variant_mask.detach().cpu() if phased_variant_mask is not None else None
+    region_masks_cpu = {name: mask.detach().cpu() for name, mask in (region_masks or {}).items()}
 
     seq_distances: List[float] = []
     seq_norm_distances: List[float] = []
@@ -229,6 +303,9 @@ def summarize_sequence_label_predictions(
     high_support_entropy_identities: List[float] = []
     low_support_agreement_identities: List[float] = []
     high_support_agreement_identities: List[float] = []
+    variant_rich_identities: List[float] = []
+    phased_variant_identities: List[float] = []
+    region_identity_buckets: Dict[str, List[float]] = {name: [] for name in region_masks_cpu}
 
     support_entropy_by_window: List[float] = []
     support_agreement_by_window: List[float] = []
@@ -242,6 +319,8 @@ def summarize_sequence_label_predictions(
             support_base_support.detach(),
             None if support_del_mask is None else support_del_mask.detach(),
             None if support_ins_base_support is None else support_ins_base_support.detach(),
+            None if support_haplotype is None else support_haplotype.detach(),
+            None if support_same_haplotype is None else support_same_haplotype.detach(),
         )
         support_entropy_cpu = support_stats["entropy"].detach().cpu()
         support_agreement_cpu = support_stats["agreement"].detach().cpu()
@@ -270,6 +349,17 @@ def summarize_sequence_label_predictions(
                 low_complexity_identities.append(1.0 - (distance / denom))
             if repeat_richness >= _REPEAT_RICH_THRESHOLD:
                 repeat_rich_identities.append(1.0 - (distance / denom))
+            if variant_mask_cpu is not None:
+                variant_fraction = float(variant_mask_cpu[i, :valid_len].float().mean().item())
+                if variant_fraction >= 0.05:
+                    variant_rich_identities.append(1.0 - (distance / denom))
+            if phased_variant_mask_cpu is not None:
+                phased_fraction = float(phased_variant_mask_cpu[i, :valid_len].float().mean().item())
+                if phased_fraction >= 0.05:
+                    phased_variant_identities.append(1.0 - (distance / denom))
+            for region_name, region_mask in region_masks_cpu.items():
+                if float(region_mask[i, :valid_len].float().mean().item()) > 0.0:
+                    region_identity_buckets[region_name].append(1.0 - (distance / denom))
 
         if support_entropy_cpu is not None:
             window_entropy = float(support_entropy_cpu[i, :valid_len].mean().item())
@@ -314,6 +404,7 @@ def summarize_sequence_label_predictions(
     core_valid = core_labels.ne(PAD_EDIT_ID)
     homopolymer_mask = target_run_lengths_cpu >= _HOMOPOLYMER_THRESHOLD
     non_homopolymer_mask = ~homopolymer_mask
+    variant_site_mask = variant_mask_cpu > 0 if variant_mask_cpu is not None else None
 
     def masked_error_rate(mask: torch.Tensor) -> float:
         masked = mask & core_valid
@@ -335,6 +426,8 @@ def summarize_sequence_label_predictions(
         "non_homopolymer_core_error_rate": masked_error_rate(non_homopolymer_mask),
         "low_complexity_sequence_identity": sum(low_complexity_identities) / max(len(low_complexity_identities), 1),
         "repeat_rich_sequence_identity": sum(repeat_rich_identities) / max(len(repeat_rich_identities), 1),
+        "variant_rich_sequence_identity": sum(variant_rich_identities) / max(len(variant_rich_identities), 1),
+        "phased_variant_sequence_identity": sum(phased_variant_identities) / max(len(phased_variant_identities), 1),
         "low_support_entropy_sequence_identity": sum(low_support_entropy_identities) / max(len(low_support_entropy_identities), 1),
         "high_support_entropy_sequence_identity": sum(high_support_entropy_identities) / max(len(high_support_entropy_identities), 1),
         "low_support_agreement_sequence_identity": sum(low_support_agreement_identities) / max(len(low_support_agreement_identities), 1),
@@ -347,6 +440,28 @@ def summarize_sequence_label_predictions(
         "low_support_agreement_window_count": float(low_support_agreement_window_count),
         "high_support_agreement_window_count": float(high_support_agreement_window_count),
     }
+    if variant_site_mask is not None:
+        masked = variant_site_mask & core_valid
+        if masked.sum() == 0:
+            out["variant_site_core_error_rate"] = 0.0
+        else:
+            errors = (core_preds != core_labels) & masked
+            out["variant_site_core_error_rate"] = float((errors.sum().float() / masked.sum().float()).cpu())
+    if phased_variant_mask_cpu is not None:
+        masked = phased_variant_mask_cpu.bool() & core_valid
+        if masked.sum() == 0:
+            out["phased_variant_core_error_rate"] = 0.0
+        else:
+            errors = (core_preds != core_labels) & masked
+            out["phased_variant_core_error_rate"] = float((errors.sum().float() / masked.sum().float()).cpu())
+    for region_name, identities in region_identity_buckets.items():
+        out[f"{region_name}_sequence_identity"] = sum(identities) / max(len(identities), 1)
+        masked = region_masks_cpu[region_name].bool() & core_valid
+        if masked.sum() == 0:
+            out[f"{region_name}_core_error_rate"] = 0.0
+        else:
+            errors = (core_preds != core_labels) & masked
+            out[f"{region_name}_core_error_rate"] = float((errors.sum().float() / masked.sum().float()).cpu())
     return out
 
 
@@ -358,9 +473,14 @@ def summarize_sequence_predictions(
     target_run_lengths: torch.Tensor,
     metadata: List[Dict[str, object]],
     max_insertions_per_pos: int,
+    variant_mask: torch.Tensor | None = None,
+    phased_variant_mask: torch.Tensor | None = None,
+    region_masks: Dict[str, torch.Tensor] | None = None,
     support_base_support: torch.Tensor | None = None,
     support_del_mask: torch.Tensor | None = None,
     support_ins_base_support: torch.Tensor | None = None,
+    support_haplotype: torch.Tensor | None = None,
+    support_same_haplotype: torch.Tensor | None = None,
     trust_gate: torch.Tensor | None = None,
 ) -> Dict[str, float]:
     preds = logits.argmax(dim=-1)
@@ -372,9 +492,14 @@ def summarize_sequence_predictions(
         target_run_lengths,
         metadata,
         max_insertions_per_pos,
+        variant_mask=variant_mask,
+        phased_variant_mask=phased_variant_mask,
+        region_masks=region_masks,
         support_base_support=support_base_support,
         support_del_mask=support_del_mask,
         support_ins_base_support=support_ins_base_support,
+        support_haplotype=support_haplotype,
+        support_same_haplotype=support_same_haplotype,
         trust_gate=trust_gate,
     )
 
@@ -384,6 +509,8 @@ def summarize_support_trust(
     support_base_support: torch.Tensor,
     support_del_mask: torch.Tensor,
     support_ins_base_support: torch.Tensor,
+    support_haplotype: torch.Tensor,
+    support_same_haplotype: torch.Tensor,
     target_run_lengths: torch.Tensor,
     target_mask: torch.Tensor,
 ) -> Dict[str, float]:
@@ -394,6 +521,8 @@ def summarize_support_trust(
         support_base_support.detach(),
         support_del_mask.detach(),
         support_ins_base_support.detach(),
+        support_haplotype.detach(),
+        support_same_haplotype.detach(),
     )
     valid_mask = target_mask.bool()
     low_entropy_mask = support_stats["entropy"] <= _LOW_SUPPORT_ENTROPY_THRESHOLD
@@ -418,6 +547,8 @@ def summarize_support_trust(
         "trust_gate_non_homopolymer_mean": masked_mean(trust_gate, ~homopolymer_mask),
         "support_confidence_mean": masked_mean(support_stats["confidence"], valid_mask),
         "support_uncertainty_mean": masked_mean(support_stats["uncertainty"], valid_mask),
+        "support_hap_agreement_mean": masked_mean(support_stats["hap_agreement"], valid_mask),
+        "support_hap_consistency_mean": masked_mean(support_stats["hap_consistency"], valid_mask),
     }
 
 

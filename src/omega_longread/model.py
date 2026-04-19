@@ -31,6 +31,7 @@ class OmegaModel(nn.Module):
         self.base_emb = nn.Embedding(mcfg.base_vocab_size, d_model)
         self.qual_emb = nn.Embedding(mcfg.quality_vocab_size, d_model)
         self.run_len_proj = nn.Linear(1, d_model)
+        self.target_feat_proj = nn.Linear(mcfg.target_feature_dim, d_model)
 
         self.support_base_emb = nn.Embedding(mcfg.base_vocab_size, d_model)
         self.support_qual_emb = nn.Embedding(mcfg.quality_vocab_size, d_model)
@@ -52,7 +53,7 @@ class OmegaModel(nn.Module):
             dropout=mcfg.dropout,
             kernel_size=mcfg.conv_kernel_size,
         )
-        self.aggregator = OverlapAggregator(d_model, mcfg.dropout, support_feature_dim=6)
+        self.aggregator = OverlapAggregator(d_model, mcfg.dropout, support_feature_dim=9)
 
         self.edit_head = nn.Sequential(
             nn.Linear(2 * d_model, d_model),
@@ -75,6 +76,24 @@ class OmegaModel(nn.Module):
             nn.Linear(2 * d_model, d_model),
             nn.GELU(),
             nn.Linear(d_model, 1),
+        )
+        self.deletion_candidate_head = nn.Sequential(
+            nn.Linear(2 * d_model, d_model),
+            nn.GELU(),
+            nn.Dropout(mcfg.dropout),
+            nn.Linear(d_model, 1),
+        )
+        self.deletion_length_head = nn.Sequential(
+            nn.Linear(2 * d_model, d_model),
+            nn.GELU(),
+            nn.Dropout(mcfg.dropout),
+            nn.Linear(d_model, mcfg.max_deletion_length + 1),
+        )
+        self.run_length_head = nn.Sequential(
+            nn.Linear(2 * d_model, d_model),
+            nn.GELU(),
+            nn.Dropout(mcfg.dropout),
+            nn.Linear(d_model, mcfg.run_length_classes + 1),
         )
         if mcfg.support_mode not in {"full", "target_only", "support_only", "masked_target"}:
             raise ValueError(f"Unsupported support_mode={mcfg.support_mode!r}.")
@@ -103,9 +122,35 @@ class OmegaModel(nn.Module):
         edit_logits[:, :, -1, :] = filtered_core_logits
         return edit_logits
 
-    def encode_target(self, target_bases: torch.Tensor, target_quals: torch.Tensor, target_run_lengths: torch.Tensor, target_mask: torch.Tensor) -> torch.Tensor:
+    def encode_target(
+        self,
+        target_bases: torch.Tensor,
+        target_quals: torch.Tensor,
+        target_run_lengths: torch.Tensor,
+        target_mask: torch.Tensor,
+        tandem_repeat_flag: torch.Tensor,
+        deletion_support_count: torch.Tensor,
+        deletion_support_fraction: torch.Tensor,
+        local_support_entropy: torch.Tensor,
+        local_support_agreement: torch.Tensor,
+        local_support_depth: torch.Tensor,
+        gap_length_histogram: torch.Tensor,
+    ) -> torch.Tensor:
         x = self.base_emb(target_bases) + self.qual_emb(target_quals.clamp_min(0))
         x = x + self.run_len_proj(target_run_lengths.unsqueeze(-1).float())
+        target_features = torch.cat(
+            [
+                tandem_repeat_flag.unsqueeze(-1).float(),
+                deletion_support_count.unsqueeze(-1).float(),
+                deletion_support_fraction.unsqueeze(-1).float(),
+                local_support_entropy.unsqueeze(-1).float(),
+                local_support_agreement.unsqueeze(-1).float(),
+                local_support_depth.unsqueeze(-1).float(),
+                gap_length_histogram.float(),
+            ],
+            dim=-1,
+        )
+        x = x + self.target_feat_proj(target_features)
         return self.target_encoder(x, target_mask)
 
     def encode_masked_target(self, target_mask: torch.Tensor) -> torch.Tensor:
@@ -125,18 +170,31 @@ class OmegaModel(nn.Module):
         support_valid_mask: torch.Tensor,
         support_base_support: torch.Tensor,
         support_ins_base_support: torch.Tensor,
+        support_strand: torch.Tensor,
+        support_haplotype: torch.Tensor,
+        support_same_haplotype: torch.Tensor,
     ) -> torch.Tensor:
         batch, num_support, support_len = support_bases.shape
+        hap_one_hot = torch.stack(
+            [
+                support_haplotype.eq(0).float(),
+                support_haplotype.eq(1).float(),
+                support_haplotype.eq(2).float(),
+            ],
+            dim=-1,
+        )
         feat = torch.stack(
             [
                 support_match_mask.float(),
                 support_ins_mask.float(),
                 support_del_mask.float(),
                 support_valid_mask.float(),
+                support_strand.float(),
+                support_same_haplotype.float(),
             ],
             dim=-1,
         )
-        feat = torch.cat([feat, support_base_support, support_ins_base_support], dim=-1)
+        feat = torch.cat([feat, support_base_support, support_ins_base_support, hap_one_hot], dim=-1)
         x = self.support_base_emb(support_bases) + self.support_qual_emb(support_quals.clamp_min(0))
         x = x + self.support_feat_proj(feat)
         x = x.view(batch * num_support, support_len, -1)
@@ -154,6 +212,13 @@ class OmegaModel(nn.Module):
                 batch.target_quals,
                 batch.target_run_lengths,
                 batch.target_mask,
+                batch.tandem_repeat_flag,
+                batch.deletion_support_count,
+                batch.deletion_support_fraction,
+                batch.local_support_entropy,
+                batch.local_support_agreement,
+                batch.local_support_depth,
+                batch.gap_length_histogram,
             )
         support_hidden = self.encode_support(
             batch.support_bases,
@@ -164,6 +229,9 @@ class OmegaModel(nn.Module):
             batch.support_valid_mask,
             batch.support_base_support,
             batch.support_ins_base_support,
+            batch.support_strand,
+            batch.support_haplotype,
+            batch.support_same_haplotype,
         )
         support_token_mask = batch.support_valid_mask & (
             batch.support_del_mask.bool()
@@ -174,6 +242,8 @@ class OmegaModel(nn.Module):
             batch.support_base_support,
             batch.support_del_mask,
             batch.support_ins_base_support,
+            batch.support_haplotype,
+            batch.support_same_haplotype,
         )
         support_features = torch.stack(
             [
@@ -183,6 +253,9 @@ class OmegaModel(nn.Module):
                 support_stats["ins_agreement"],
                 1.0 - support_stats["ins_entropy"],
                 support_stats["ins_depth_norm"],
+                support_stats["hap_agreement"],
+                support_stats["hap_consistency"],
+                support_stats["phasing_depth_norm"],
             ],
             dim=-1,
         )
@@ -219,6 +292,9 @@ class OmegaModel(nn.Module):
             "support_logits": self.support_dist_head(fused),
             "uncertainty_logits": self.uncertainty_head(fused),
             "preserve_logits": self.preserve_head(fused).squeeze(-1),
+            "deletion_candidate_logits": self.deletion_candidate_head(fused).squeeze(-1),
+            "deletion_length_logits": self.deletion_length_head(fused),
+            "run_length_logits": self.run_length_head(fused),
             "trust_gate": trust_gate,
             "support_confidence": support_stats["confidence"],
             "support_uncertainty": support_stats["uncertainty"],
@@ -226,6 +302,7 @@ class OmegaModel(nn.Module):
             "support_agreement": support_stats["agreement"],
             "support_depth": support_stats["depth"],
             "support_del_count": support_stats["del_counts"],
+            "support_del_fraction": support_stats["del_fraction"],
             "support_ins_depth": support_stats["ins_depth"],
             "support_ins_agreement": support_stats["ins_agreement"],
         }

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List
+from typing import Dict, List
 
 
 @dataclass
@@ -15,9 +15,12 @@ class ModelConfig:
     num_layers: int = 6
     ff_mult: int = 4
     dropout: float = 0.1
-    support_feature_dim: int = 12
+    target_feature_dim: int = 10
+    support_feature_dim: int = 17
     max_supports: int = 16
     max_insertions_per_pos: int = 2
+    max_deletion_length: int = 4
+    run_length_classes: int = 8
     conv_kernel_size: int = 5
     support_mode: str = "full"
     apply_hard_edit_support_filter: bool = False
@@ -27,6 +30,12 @@ class ModelConfig:
     hard_edit_filter_logit_bias: float = 3.0
     inference_hard_edit_confidence_threshold: float = 0.0
     inference_hard_edit_temperature: float = 1.0
+    inference_sub_confidence_threshold: float = 0.8
+    inference_del_confidence_threshold: float = 0.92
+    inference_ins_confidence_threshold: float = 0.75
+    deletion_commit_trust_threshold: float = 0.8
+    deletion_candidate_threshold: float = 0.8
+    inference_use_deletion_consistency_check: bool = True
 
 
 @dataclass
@@ -34,10 +43,13 @@ class DataConfig:
     train_path: str = "data/train.jsonl"
     val_path: str = "data/val.jsonl"
     test_path: str = "data/test.jsonl"
+    manifest_path: str = ""
     max_target_len: int = 1024
     max_supports: int = 16
     max_support_len: int = 1024
     num_workers: int = 4
+    region_names: List[str] = field(default_factory=list)
+    deletion_oversample_weight: float = 2.5
 
 
 @dataclass
@@ -48,15 +60,19 @@ class TrainConfig:
     lr: float = 3e-4
     weight_decay: float = 1e-2
     grad_clip_norm: float = 1.0
-    device: str = "cuda"
+    device: str = "auto"
     mixed_precision: bool = True
     log_every: int = 20
     eval_every: int = 1
     save_dir: str = "checkpoints"
+    init_checkpoint: str = ""
     checkpoint_metric: str = "loss"
     checkpoint_metric_mode: str = "min"
     checkpoint_overcorrection_weight: float = 0.5
+    checkpoint_hard_edit_fp_weight: float = 0.5
     checkpoint_length_ratio_weight: float = 0.25
+    early_stopping_patience: int = 0
+    oversample_deletion_windows: bool = False
 
 
 @dataclass
@@ -69,6 +85,10 @@ class LossConfig:
     lambda_hard_edit: float = 0.0
     lambda_hard_edit_precision: float = 0.0
     lambda_selective_hard_edit: float = 0.0
+    lambda_deletion_candidate: float = 0.0
+    lambda_deletion_length: float = 0.0
+    lambda_run_length_aux: float = 0.0
+    lambda_deletion_positive_reward: float = 0.0
     lambda_support: float = 0.0
     lambda_preserve: float = 0.15
     lambda_uncertainty: float = 0.1
@@ -93,6 +113,10 @@ class LossConfig:
     selective_hard_edit_confidence_threshold: float = 0.6
     selective_hard_edit_uncertainty_threshold: float = 0.4
     selective_hard_edit_min_support_agreement: float = 0.85
+    deletion_focal_gamma: float = 2.0
+    deletion_false_positive_weight: float = 6.0
+    deletion_false_negative_weight: float = 1.0
+    deletion_positive_reward_scale: float = 1.0
 
 
 @dataclass

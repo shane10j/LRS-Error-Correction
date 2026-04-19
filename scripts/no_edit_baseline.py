@@ -17,58 +17,23 @@ from omega_longread.metrics import (
     summarize_edit_label_predictions,
     summarize_sequence_label_predictions,
 )
-from omega_longread.support import compute_support_statistics
 from omega_longread.tokenizer import DNATokenizer
 from omega_longread.utils import load_config, save_json
-from omega_longread.vocab import BASE_TO_ID, EDIT_TO_ID, PAD_EDIT_ID
+from omega_longread.vocab import EDIT_TO_ID, PAD_EDIT_ID
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate a conservative support-consensus baseline on OMEGA JSONL windows.")
+    parser = argparse.ArgumentParser(description="Evaluate a no-edit abstention baseline on OMEGA JSONL windows.")
     parser.add_argument("--config", required=True)
     parser.add_argument("--data-path", default=None, help="Override cfg.data.test_path.")
-    parser.add_argument("--min-support-depth", type=float, default=2.0)
-    parser.add_argument("--min-agreement", type=float, default=0.85)
-    parser.add_argument("--max-entropy", type=float, default=0.35)
-    parser.add_argument("--delete-threshold", type=float, default=0.8)
     parser.add_argument("--summary-out", default=None)
     parser.add_argument("--predictions-out", default=None)
     return parser.parse_args()
 
 
-def build_consensus_predictions(batch, cfg: OmegaConfig, args: argparse.Namespace) -> torch.Tensor:
-    device = batch.edit_labels.device
-    batch_size, seq_len, num_slots = batch.edit_labels.shape
-    preds = torch.full((batch_size, seq_len, num_slots), PAD_EDIT_ID, dtype=torch.long, device=device)
+def build_no_edit_predictions(batch) -> torch.Tensor:
+    preds = torch.full_like(batch.edit_labels, PAD_EDIT_ID)
     preds[:, :, -1] = EDIT_TO_ID["COPY"]
-
-    support_stats = compute_support_statistics(
-        batch.support_base_support,
-        batch.support_del_mask,
-        batch.support_ins_base_support,
-    )
-    base_counts = support_stats["counts"]
-    evidence_depth = support_stats["depth"]
-    delete_frac = support_stats["del_counts"] / evidence_depth.clamp_min(1.0)
-    base_probs = base_counts / base_counts.sum(dim=-1, keepdim=True).clamp_min(1.0)
-    base_agreement, best_base_idx = base_probs.max(dim=-1)
-
-    valid_mask = batch.target_mask.bool()
-    evidence_mask = evidence_depth >= args.min_support_depth
-    low_entropy_mask = support_stats["entropy"] <= args.max_entropy
-    confident_base_mask = evidence_mask & low_entropy_mask & (base_agreement >= args.min_agreement)
-    confident_delete_mask = evidence_mask & low_entropy_mask & (delete_frac >= args.delete_threshold) & (delete_frac >= base_agreement)
-
-    noisy_base_ids = batch.target_bases
-    for base_char in "ACGT":
-        base_id = BASE_TO_ID[base_char]
-        sub_token = EDIT_TO_ID[f"SUB_{base_char}"]
-        sub_mask = confident_base_mask & (best_base_idx == base_id) & (noisy_base_ids != base_id) & valid_mask
-        preds[:, :, -1][sub_mask] = sub_token
-
-    del_mask = confident_delete_mask & valid_mask
-    preds[:, :, -1][del_mask] = EDIT_TO_ID["DEL"]
-    preds[:, :, :-1] = PAD_EDIT_ID
     return preds
 
 
@@ -92,7 +57,7 @@ def main() -> None:
     prediction_rows: List[dict] = []
 
     for batch in loader:
-        preds = build_consensus_predictions(batch, cfg, args)
+        preds = build_no_edit_predictions(batch)
         row = summarize_edit_label_predictions(preds, batch.edit_labels)
         row.update(
             summarize_sequence_label_predictions(
@@ -153,11 +118,7 @@ def main() -> None:
         raise RuntimeError(f"No evaluable examples found in {data_path}")
 
     metrics = aggregate_metric_dicts(metric_rows)
-    metrics["baseline"] = "conservative_support_consensus"
-    metrics["min_support_depth"] = args.min_support_depth
-    metrics["min_agreement"] = args.min_agreement
-    metrics["max_entropy"] = args.max_entropy
-    metrics["delete_threshold"] = args.delete_threshold
+    metrics["baseline"] = "no_edit_abstention"
     print(json.dumps(metrics, indent=2))
 
     if args.summary_out:

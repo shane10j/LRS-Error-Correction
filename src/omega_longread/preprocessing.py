@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import math
 from bisect import bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Sequence
+from typing import Dict, Iterable, Iterator, List, Mapping, Sequence
 
 import pysam
 
@@ -37,6 +38,8 @@ class SupportProjection:
     qual_by_ref: Dict[int, int]
     deleted_ref_positions: set[int]
     insertion_bases_by_ref: Dict[int, List[str]]
+    haplotype: int
+    strand: int
 
 
 class IntervalLookup:
@@ -79,8 +82,9 @@ class IntervalLookup:
 
 
 class VariantLookup:
-    def __init__(self, path: str | None) -> None:
+    def __init__(self, path: str | None, phased_only: bool = False) -> None:
         self.path = path
+        self.phased_only = phased_only
         self.vcf = pysam.VariantFile(path) if path else None
 
     def positions(self, contig: str, start: int, end: int) -> set[int]:
@@ -92,6 +96,10 @@ class VariantLookup:
         except (KeyError, ValueError):
             return hits
         for rec in records:
+            if self.phased_only:
+                samples = list(rec.samples.values())
+                if not samples or not any(getattr(sample, "phased", False) for sample in samples):
+                    continue
             rec_start = max(start, rec.start)
             rec_end = min(end, max(rec.stop, rec.start + 1))
             for pos in range(rec_start, rec_end):
@@ -126,6 +134,145 @@ def compute_run_lengths(seq: str) -> List[int]:
     return out
 
 
+def detect_tandem_repeat_flags(seq: str, max_motif_len: int = 3, min_repeats: int = 2) -> List[int]:
+    flags = [0] * len(seq)
+    for motif_len in range(1, max_motif_len + 1):
+        span = motif_len * min_repeats
+        for start in range(0, max(len(seq) - span + 1, 0)):
+            motif = seq[start : start + motif_len]
+            if "N" in motif or len(motif) < motif_len:
+                continue
+            matched = True
+            offset = start
+            repeat_count = 0
+            while offset + motif_len <= len(seq) and seq[offset : offset + motif_len] == motif:
+                repeat_count += 1
+                offset += motif_len
+            if matched and repeat_count >= min_repeats:
+                for idx in range(start, min(offset, len(seq))):
+                    flags[idx] = 1
+    return flags
+
+
+def _banded_align_to_edit_labels(
+    noisy_seq: str,
+    target_seq: str,
+    max_insertions_per_pos: int,
+    band_width: int = 12,
+) -> List[List[int]]:
+    n = len(noisy_seq)
+    m = len(target_seq)
+    inf = 10 ** 9
+    dp = [[inf] * (m + 1) for _ in range(n + 1)]
+    back: List[List[tuple[int, int, str] | None]] = [[None] * (m + 1) for _ in range(n + 1)]
+    dp[0][0] = 0
+    for i in range(1, n + 1):
+        if i <= band_width:
+            dp[i][0] = i
+            back[i][0] = (i - 1, 0, "D")
+    for j in range(1, m + 1):
+        if j <= band_width:
+            dp[0][j] = j
+            back[0][j] = (0, j - 1, "I")
+
+    for i in range(1, n + 1):
+        j_lo = max(1, i - band_width)
+        j_hi = min(m, i + band_width)
+        for j in range(j_lo, j_hi + 1):
+            candidates: List[tuple[int, tuple[int, int, str]]] = []
+            sub_cost = 0 if noisy_seq[i - 1] == target_seq[j - 1] else 1
+            if dp[i - 1][j - 1] < inf:
+                candidates.append((dp[i - 1][j - 1] + sub_cost, (i - 1, j - 1, "M")))
+            if dp[i - 1][j] < inf:
+                candidates.append((dp[i - 1][j] + 1, (i - 1, j, "D")))
+            if dp[i][j - 1] < inf:
+                candidates.append((dp[i][j - 1] + 1, (i, j - 1, "I")))
+            # Prefer deletions, then insertions, then substitutions on ties to left-normalize.
+            score, prev = min(
+                candidates,
+                key=lambda item: (
+                    item[0],
+                    {"D": 0, "I": 1, "M": 2}[item[1][2]],
+                ),
+            )
+            dp[i][j] = score
+            back[i][j] = prev
+
+    i, j = n, m
+    ops: List[str] = []
+    while i > 0 or j > 0:
+        prev = back[i][j]
+        if prev is None:
+            if i > 0:
+                prev = (i - 1, j, "D")
+            else:
+                prev = (i, j - 1, "I")
+        pi, pj, op = prev
+        ops.append(op)
+        i, j = pi, pj
+    ops.reverse()
+
+    edit_labels: List[List[int]] = []
+    pending_insertions: List[int] = []
+    noisy_idx = 0
+    target_idx = 0
+    for op in ops:
+        if op == "I":
+            if target_idx < len(target_seq):
+                target_base = normalize_base(target_seq[target_idx])
+                if target_base in _DNA_BASES:
+                    pending_insertions.append(EDIT_TO_ID[f"INS_{target_base}"])
+            target_idx += 1
+            continue
+        if noisy_idx >= len(noisy_seq):
+            break
+        noisy_base = normalize_base(noisy_seq[noisy_idx])
+        if op == "D":
+            core_label = EDIT_TO_ID["DEL"]
+        else:
+            target_base = normalize_base(target_seq[target_idx]) if target_idx < len(target_seq) else noisy_base
+            core_label = EDIT_TO_ID["COPY"] if noisy_base == target_base or target_base == "N" else EDIT_TO_ID[f"SUB_{target_base}"]
+            target_idx += 1
+        edit_labels.append(_pad_insertion_labels(pending_insertions, max_insertions_per_pos) + [core_label])
+        pending_insertions = []
+        noisy_idx += 1
+
+    while len(edit_labels) < len(noisy_seq):
+        edit_labels.append([PAD_EDIT_ID] * max_insertions_per_pos + [EDIT_TO_ID["COPY"]])
+    return edit_labels
+
+
+def canonicalize_indel_windows(
+    noisy_seq: str,
+    edit_labels: List[List[int]],
+    max_insertions_per_pos: int,
+    flank: int = 6,
+    band_width: int = 12,
+) -> List[List[int]]:
+    hard_positions = [
+        idx
+        for idx, slots in enumerate(edit_labels)
+        if (slots and slots[-1] == EDIT_TO_ID["DEL"]) or any(token != PAD_EDIT_ID for token in slots[:-1])
+    ]
+    if not hard_positions:
+        return edit_labels
+
+    corrected_seq = apply_edit_ops(noisy_seq, edit_labels, max_insertions_per_pos=max_insertions_per_pos)
+    canonical_full = _banded_align_to_edit_labels(
+        noisy_seq,
+        corrected_seq,
+        max_insertions_per_pos=max_insertions_per_pos,
+        band_width=band_width,
+    )
+    normalized = [list(slots) for slots in edit_labels]
+    for pos in hard_positions:
+        start = max(0, pos - flank)
+        end = min(len(edit_labels), pos + flank + 1)
+        for idx in range(start, end):
+            normalized[idx] = canonical_full[idx]
+    return normalized
+
+
 def one_hot_base(base: str) -> List[float]:
     if base == "A":
         return [1.0, 0.0, 0.0, 0.0]
@@ -151,6 +298,14 @@ def base_count_vector(bases: Sequence[str]) -> List[float]:
         elif base == "T":
             counts[3] += 1.0
     return counts
+
+
+def extract_haplotype_tag(aln: pysam.AlignedSegment) -> int:
+    try:
+        hp = int(aln.get_tag("HP"))
+    except (KeyError, TypeError, ValueError):
+        return 0
+    return hp if hp in {1, 2} else 0
 
 
 def _pad_insertion_labels(tokens: List[int], max_insertions_per_pos: int) -> List[int]:
@@ -230,13 +385,18 @@ def build_read_encoding(
     if not target_bases:
         return None
     target_seq = "".join(target_bases)
+    canonical_edit_labels = canonicalize_indel_windows(
+        target_seq,
+        edit_labels,
+        max_insertions_per_pos=max_insertions_per_pos,
+    )
     return ReadEncoding(
         read_id=aln.query_name,
         contig=aln.reference_name,
         target_bases=target_seq,
         target_qualities=target_qualities,
         target_run_lengths=compute_run_lengths(target_seq),
-        edit_labels=edit_labels,
+        edit_labels=canonical_edit_labels,
         ref_positions=ref_positions,
     )
 
@@ -305,6 +465,8 @@ def build_support_projection(aln: pysam.AlignedSegment) -> SupportProjection | N
         qual_by_ref=qual_by_ref,
         deleted_ref_positions=deleted_ref_positions,
         insertion_bases_by_ref=dict(insertion_bases_by_ref),
+        haplotype=extract_haplotype_tag(aln),
+        strand=-1 if aln.is_reverse else 1,
     )
 
 
@@ -340,6 +502,7 @@ def project_support_onto_window(
     projection: SupportProjection,
     window_ref_positions: Sequence[int | None],
     target_window_bases: str,
+    target_haplotype: int,
 ) -> dict:
     support_chars: List[str] = []
     support_quals: List[int] = []
@@ -348,8 +511,14 @@ def project_support_onto_window(
     support_del_mask: List[int] = []
     support_base_support: List[List[float]] = []
     support_ins_base_support: List[List[float]] = []
+    support_strand: List[float] = []
+    support_haplotype: List[float] = []
+    support_same_haplotype: List[float] = []
 
     for ref_pos, target_base in zip(window_ref_positions, target_window_bases):
+        support_strand.append(float(projection.strand))
+        support_haplotype.append(float(projection.haplotype))
+        support_same_haplotype.append(float(target_haplotype > 0 and projection.haplotype == target_haplotype))
         if ref_pos is None:
             support_chars.append("N")
             support_quals.append(0)
@@ -392,6 +561,9 @@ def project_support_onto_window(
         "support_del_mask": support_del_mask,
         "support_base_support": support_base_support,
         "support_ins_base_support": support_ins_base_support,
+        "support_strand": support_strand,
+        "support_haplotype": support_haplotype,
+        "support_same_haplotype": support_same_haplotype,
     }
 
 
@@ -436,6 +608,127 @@ def infer_uncertainty_labels(
     return preserve_mask, uncertainty_labels
 
 
+def build_deletion_targets(
+    window_edit_labels: Sequence[Sequence[int]],
+    max_deletion_length: int,
+) -> tuple[List[int], List[int]]:
+    candidate_labels = [0] * len(window_edit_labels)
+    length_labels = [0] * len(window_edit_labels)
+    i = 0
+    while i < len(window_edit_labels):
+        is_del = bool(window_edit_labels[i]) and window_edit_labels[i][-1] == EDIT_TO_ID["DEL"]
+        if not is_del:
+            i += 1
+            continue
+        start = i
+        while i < len(window_edit_labels) and window_edit_labels[i][-1] == EDIT_TO_ID["DEL"]:
+            i += 1
+        run_len = i - start
+        candidate_labels[start] = 1
+        length_labels[start] = min(run_len, max_deletion_length)
+    return candidate_labels, length_labels
+
+
+def compute_gap_length_histogram(
+    support_del_mask: Sequence[Sequence[int]],
+    max_deletion_length: int,
+) -> List[List[float]]:
+    if not support_del_mask:
+        return []
+    seq_len = len(support_del_mask[0])
+    hist = [[0.0 for _ in range(max_deletion_length)] for _ in range(seq_len)]
+    for row in support_del_mask:
+        idx = 0
+        while idx < seq_len:
+            if not row[idx]:
+                idx += 1
+                continue
+            start = idx
+            while idx < seq_len and row[idx]:
+                idx += 1
+            run_len = idx - start
+            bucket = min(run_len, max_deletion_length) - 1
+            for pos in range(start, idx):
+                hist[pos][bucket] += 1.0
+    return hist
+
+
+def compute_local_support_features(
+    support_base_support: Sequence[Sequence[Sequence[float]]],
+    support_del_mask: Sequence[Sequence[int]],
+    max_deletion_length: int,
+) -> dict:
+    if not support_base_support:
+        return {
+            "deletion_support_count": [],
+            "deletion_support_fraction": [],
+            "local_support_entropy": [],
+            "local_support_agreement": [],
+            "local_support_depth": [],
+            "gap_length_histogram": [],
+        }
+    seq_len = len(support_base_support[0])
+    gap_hist = compute_gap_length_histogram(support_del_mask, max_deletion_length)
+    deletion_support_count: List[float] = []
+    deletion_support_fraction: List[float] = []
+    local_support_entropy: List[float] = []
+    local_support_agreement: List[float] = []
+    local_support_depth: List[float] = []
+    for pos in range(seq_len):
+        base_counts = [0.0, 0.0, 0.0, 0.0]
+        del_count = 0.0
+        for row in support_base_support:
+            for base_idx in range(4):
+                base_counts[base_idx] += float(row[pos][base_idx])
+        for del_row in support_del_mask:
+            del_count += float(del_row[pos])
+        core_counts = base_counts + [del_count]
+        depth = sum(core_counts)
+        if depth <= 0:
+            deletion_support_count.append(0.0)
+            deletion_support_fraction.append(0.0)
+            local_support_entropy.append(0.0)
+            local_support_agreement.append(0.0)
+            local_support_depth.append(0.0)
+            continue
+        probs = [count / depth for count in core_counts]
+        entropy = 0.0
+        for prob in probs:
+            if prob > 0.0:
+                entropy -= prob * math.log(prob)
+        entropy /= math.log(len(core_counts))
+        deletion_support_count.append(del_count)
+        deletion_support_fraction.append(del_count / depth)
+        local_support_entropy.append(entropy)
+        local_support_agreement.append(max(probs))
+        local_support_depth.append(depth)
+    return {
+        "deletion_support_count": deletion_support_count,
+        "deletion_support_fraction": deletion_support_fraction,
+        "local_support_entropy": local_support_entropy,
+        "local_support_agreement": local_support_agreement,
+        "local_support_depth": local_support_depth,
+        "gap_length_histogram": gap_hist,
+    }
+
+
+def build_region_masks(
+    contig: str,
+    window_ref_positions: Sequence[int | None],
+    region_lookups: Mapping[str, IntervalLookup | None],
+    target_run_lengths: Sequence[int],
+) -> Dict[str, List[int]]:
+    masks: Dict[str, List[int]] = {}
+    for name, lookup in region_lookups.items():
+        mask: List[int] = []
+        for ref_pos in window_ref_positions:
+            mask.append(int(ref_pos is not None and lookup is not None and lookup.contains(contig, ref_pos)))
+        masks[name] = mask
+    if "homopolymer" not in masks:
+        masks["homopolymer"] = [int(run_len >= 3) for run_len in target_run_lengths]
+    return masks
+
+
 def iter_windows(length: int, window_size: int, window_overlap: int, min_window_size: int) -> Iterator[tuple[int, int]]:
     step = max(1, window_size - window_overlap)
     start = 0
@@ -453,12 +746,51 @@ def split_name_for_contig(
     train_contigs: set[str],
     val_contigs: set[str],
     test_contigs: set[str],
+    read_id: str | None = None,
 ) -> str | None:
-    if contig in test_contigs:
+    memberships = {
+        split_name
+        for split_name, split_contigs in (
+            ("train", train_contigs),
+            ("val", val_contigs),
+            ("test", test_contigs),
+        )
+        if contig in split_contigs
+    }
+    if not memberships:
+        if not train_contigs:
+            return "train"
+        return None
+
+    if memberships == {"train", "val", "test"}:
+        if not read_id:
+            return "train"
+        digest = sum(ord(ch) for ch in read_id) % 10
+        if digest == 0:
+            return "test"
+        if digest == 1:
+            return "val"
+        return "train"
+    if memberships == {"val", "test"}:
+        if not read_id:
+            return "val"
+        digest = sum(ord(ch) for ch in read_id) % 2
+        return "val" if digest == 0 else "test"
+    if memberships == {"train", "val"}:
+        if not read_id:
+            return "train"
+        digest = sum(ord(ch) for ch in read_id) % 10
+        return "val" if digest == 0 else "train"
+    if memberships == {"train", "test"}:
+        if not read_id:
+            return "train"
+        digest = sum(ord(ch) for ch in read_id) % 10
+        return "test" if digest == 0 else "train"
+    if "test" in memberships:
         return "test"
-    if contig in val_contigs:
+    if "val" in memberships:
         return "val"
-    if not train_contigs or contig in train_contigs:
+    if "train" in memberships or not train_contigs:
         return "train"
     return None
 
@@ -466,9 +798,11 @@ def split_name_for_contig(
 def build_window_example(
     target_aln: pysam.AlignedSegment,
     read_encoding: ReadEncoding,
-    bam: pysam.AlignmentFile,
+    support_bam: pysam.AlignmentFile,
     variant_lookup: VariantLookup,
+    phased_variant_lookup: VariantLookup | None,
     confidence_lookup: IntervalLookup | None,
+    region_lookups: Mapping[str, IntervalLookup | None],
     window_start: int,
     window_end: int,
     max_supports: int,
@@ -479,6 +813,7 @@ def build_window_example(
     support_disagreement_threshold: float,
     min_support_depth: int,
     max_insertions_per_pos: int,
+    max_deletion_length: int = 4,
 ) -> dict | None:
     window_ref_positions = read_encoding.ref_positions[window_start:window_end]
     mapped_positions = [pos for pos in window_ref_positions if pos is not None]
@@ -494,7 +829,7 @@ def build_window_example(
             return None
 
     support_alignments = fetch_support_alignments(
-        bam=bam,
+        bam=support_bam,
         target_aln=target_aln,
         window_ref_start=window_ref_start,
         window_ref_end=window_ref_end,
@@ -505,6 +840,7 @@ def build_window_example(
         return None
 
     target_window_bases = read_encoding.target_bases[window_start:window_end]
+    target_haplotype = extract_haplotype_tag(target_aln)
     support_rows = []
     support_base_support = []
     support_del_masks = []
@@ -512,7 +848,12 @@ def build_window_example(
         projection = build_support_projection(aln)
         if projection is None:
             continue
-        row = project_support_onto_window(projection, window_ref_positions, target_window_bases)
+        row = project_support_onto_window(
+            projection,
+            window_ref_positions,
+            target_window_bases,
+            target_haplotype=target_haplotype,
+        )
         support_rows.append(row)
         support_base_support.append(row["support_base_support"])
         support_del_masks.append(row["support_del_mask"])
@@ -520,6 +861,11 @@ def build_window_example(
         return None
 
     variant_positions = variant_lookup.positions(read_encoding.contig, window_ref_start, window_ref_end)
+    phased_variant_positions = (
+        phased_variant_lookup.positions(read_encoding.contig, window_ref_start, window_ref_end)
+        if phased_variant_lookup is not None
+        else set()
+    )
     preserve_mask, uncertainty_labels = infer_uncertainty_labels(
         contig=read_encoding.contig,
         window_ref_positions=window_ref_positions,
@@ -529,10 +875,31 @@ def build_window_example(
         disagreement_threshold=support_disagreement_threshold,
         min_support_depth=min_support_depth,
     )
+    variant_mask = [int(ref_pos is not None and ref_pos in variant_positions) for ref_pos in window_ref_positions]
+    phased_variant_mask = [int(ref_pos is not None and ref_pos in phased_variant_positions) for ref_pos in window_ref_positions]
+    region_masks = build_region_masks(
+        contig=read_encoding.contig,
+        window_ref_positions=window_ref_positions,
+        region_lookups=region_lookups,
+        target_run_lengths=read_encoding.target_run_lengths[window_start:window_end],
+    )
+    if "variant_rich" not in region_masks:
+        region_masks["variant_rich"] = variant_mask
+    if "tandem_repeat" not in region_masks:
+        region_masks["tandem_repeat"] = detect_tandem_repeat_flags(target_window_bases)
 
     window_edit_labels = read_encoding.edit_labels[window_start:window_end]
     if any(len(labels) != max_insertions_per_pos + 1 for labels in window_edit_labels):
         return None
+    deletion_candidate_labels, deletion_length_labels = build_deletion_targets(
+        window_edit_labels,
+        max_deletion_length=max_deletion_length,
+    )
+    local_support_features = compute_local_support_features(
+        support_base_support,
+        support_del_masks,
+        max_deletion_length=max_deletion_length,
+    )
 
     return {
         "read_id": f"{read_encoding.read_id}:{window_start}-{window_end}",
@@ -543,6 +910,7 @@ def build_window_example(
         "target_bases": target_window_bases,
         "target_qualities": read_encoding.target_qualities[window_start:window_end],
         "target_run_lengths": read_encoding.target_run_lengths[window_start:window_end],
+        "target_haplotype": target_haplotype,
         "support_bases": [row["support_bases"] for row in support_rows],
         "support_match_mask": [row["support_match_mask"] for row in support_rows],
         "support_ins_mask": [row["support_ins_mask"] for row in support_rows],
@@ -550,10 +918,25 @@ def build_window_example(
         "support_qualities": [row["support_qualities"] for row in support_rows],
         "support_base_support": [row["support_base_support"] for row in support_rows],
         "support_ins_base_support": [row["support_ins_base_support"] for row in support_rows],
+        "support_strand": [row["support_strand"] for row in support_rows],
+        "support_haplotype": [row["support_haplotype"] for row in support_rows],
+        "support_same_haplotype": [row["support_same_haplotype"] for row in support_rows],
         "target_sequence": apply_edit_ops(target_window_bases, window_edit_labels, max_insertions_per_pos=max_insertions_per_pos),
         "edit_labels": window_edit_labels,
+        "deletion_candidate_labels": deletion_candidate_labels,
+        "deletion_length_labels": deletion_length_labels,
+        "variant_mask": variant_mask,
+        "phased_variant_mask": phased_variant_mask,
+        "region_masks": region_masks,
         "preserve_mask": preserve_mask,
         "uncertainty_labels": uncertainty_labels,
+        "tandem_repeat_flag": region_masks["tandem_repeat"],
+        "deletion_support_count": local_support_features["deletion_support_count"],
+        "deletion_support_fraction": local_support_features["deletion_support_fraction"],
+        "local_support_entropy": local_support_features["local_support_entropy"],
+        "local_support_agreement": local_support_features["local_support_agreement"],
+        "local_support_depth": local_support_features["local_support_depth"],
+        "gap_length_histogram": local_support_features["gap_length_histogram"],
     }
 
 

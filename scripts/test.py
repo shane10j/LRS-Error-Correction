@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 from omega_longread.config import OmegaConfig
 from omega_longread.dataset import LongReadDataset, collate_long_reads
 from omega_longread.decode import apply_edit_ops
-from omega_longread.decode import filter_low_confidence_hard_edits
+from omega_longread.decode import apply_inference_constraints
 from omega_longread.losses import OmegaLoss, resolve_edit_class_weights
 from omega_longread.metrics import (
     aggregate_metric_dicts,
@@ -25,7 +25,7 @@ from omega_longread.metrics import (
 )
 from omega_longread.model import OmegaModel
 from omega_longread.tokenizer import DNATokenizer
-from omega_longread.utils import load_config, save_json
+from omega_longread.utils import load_config, resolve_torch_device, save_json
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,7 +52,10 @@ def evaluate() -> None:
     args = parse_args()
     cfg = load_config(args.config)
     data_path = args.data_path or cfg.data.test_path
-    device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
+    resolved_device, mixed_precision_ok = resolve_torch_device(cfg.train.device)
+    cfg.train.device = resolved_device
+    cfg.train.mixed_precision = bool(cfg.train.mixed_precision and mixed_precision_ok)
+    device = torch.device(cfg.train.device)
 
     dataset = LongReadDataset(data_path)
     loader = DataLoader(
@@ -81,10 +84,20 @@ def evaluate() -> None:
         with autocast(enabled=cfg.train.mixed_precision and device.type == "cuda"):
             outputs = model(batch)
             _, row = criterion(outputs, batch)
-        metric_logits = filter_low_confidence_hard_edits(
+        metric_logits = apply_inference_constraints(
             outputs["edit_logits"].detach(),
-            min_hard_edit_confidence=cfg.model.inference_hard_edit_confidence_threshold,
+            trust_gate=outputs.get("trust_gate"),
+            deletion_candidate_logits=outputs.get("deletion_candidate_logits"),
+            deletion_length_logits=outputs.get("deletion_length_logits"),
+            local_support_agreement=batch.local_support_agreement,
+            deletion_support_fraction=batch.deletion_support_fraction,
+            min_sub_confidence=cfg.model.inference_sub_confidence_threshold,
+            min_del_confidence=cfg.model.inference_del_confidence_threshold,
+            min_ins_confidence=cfg.model.inference_ins_confidence_threshold,
+            deletion_candidate_threshold=cfg.model.deletion_candidate_threshold,
+            deletion_commit_trust_threshold=cfg.model.deletion_commit_trust_threshold,
             hard_edit_temperature=cfg.model.inference_hard_edit_temperature,
+            use_deletion_consistency_check=cfg.model.inference_use_deletion_consistency_check,
         )
         row.update(summarize_edit_predictions(metric_logits, batch.edit_labels))
         row.update(
@@ -96,9 +109,14 @@ def evaluate() -> None:
                 batch.target_run_lengths,
                 batch.metadata,
                 cfg.model.max_insertions_per_pos,
+                variant_mask=batch.variant_mask,
+                phased_variant_mask=batch.phased_variant_mask,
+                region_masks=batch.region_masks,
                 support_base_support=batch.support_base_support,
                 support_del_mask=batch.support_del_mask,
                 support_ins_base_support=batch.support_ins_base_support,
+                support_haplotype=batch.support_haplotype,
+                support_same_haplotype=batch.support_same_haplotype,
                 trust_gate=outputs["trust_gate"],
             )
         )
@@ -108,6 +126,8 @@ def evaluate() -> None:
                 batch.support_base_support,
                 batch.support_del_mask,
                 batch.support_ins_base_support,
+                batch.support_haplotype,
+                batch.support_same_haplotype,
                 batch.target_run_lengths,
                 batch.target_mask,
             )
@@ -120,6 +140,9 @@ def evaluate() -> None:
                 batch.support_base_support,
                 batch.support_del_mask,
                 batch.support_ins_base_support,
+                batch.region_masks,
+                batch.support_haplotype,
+                batch.support_same_haplotype,
             )
         )
         row["overcorrection_rate"] = estimate_overcorrection(metric_logits, batch.preserve_mask, batch.edit_labels)

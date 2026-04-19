@@ -1,32 +1,47 @@
 model:
   d_model: 32
-  num_heads: 4
+  num_heads: 2
   num_layers: 1
   ff_mult: 2
   dropout: 0.1
-  support_feature_dim: 12
+  target_feature_dim: 10
+  support_feature_dim: 17
   max_supports: 8
   max_insertions_per_pos: 2
+  max_deletion_length: 4
+  run_length_classes: 8
   conv_kernel_size: 5
   support_mode: full
   apply_hard_edit_support_filter: true
   hard_edit_min_support_agreement: 0.95
   hard_edit_max_support_entropy: 0.15
-  hard_edit_min_support_depth: 2.0
+  hard_edit_min_support_depth: 1.0
   hard_edit_filter_logit_bias: 6.0
   inference_hard_edit_confidence_threshold: 0.9
   inference_hard_edit_temperature: 0.75
+  inference_sub_confidence_threshold: 0.8
+  inference_del_confidence_threshold: 0.93
+  inference_ins_confidence_threshold: 0.75
+  deletion_commit_trust_threshold: 0.85
+  deletion_candidate_threshold: 0.85
+  inference_use_deletion_consistency_check: true
 data:
-  train_path: data/real_uti89_notebook/train.jsonl
-  val_path: data/real_uti89_notebook/val.jsonl
-  test_path: data/real_uti89_notebook/test.jsonl
-  max_target_len: 1024
+  train_path: data/hg002_chr20_small_benchmark_tiny/12x/chr20_small/train.jsonl
+  val_path: data/hg002_chr20_small_benchmark_tiny/12x/chr20_small/val.jsonl
+  test_path: data/hg002_chr20_small_benchmark_tiny/12x/chr20_small/test.jsonl
+  manifest_path: data/hg002_chr20_small_benchmark_tiny/12x/chr20_small/manifest.json
+  max_target_len: 512
   max_supports: 8
-  max_support_len: 1024
+  max_support_len: 512
   num_workers: 0
+  deletion_oversample_weight: 2.5
+  region_names:
+  - homopolymer
+  - tandem_repeat
+  - variant_rich
 train:
   seed: 42
-  batch_size: 4
+  batch_size: 1
   epochs: 5
   lr: 0.0001
   weight_decay: 0.01
@@ -35,23 +50,30 @@ train:
   mixed_precision: false
   log_every: 20
   eval_every: 1
-  save_dir: checkpoints/real_uti89_notebook
+  save_dir: checkpoints/hg002_chr20_small_benchmark_tiny/12x/full
+  init_checkpoint: ''
   checkpoint_metric: composite_sequence
   checkpoint_metric_mode: max
-  checkpoint_overcorrection_weight: 3.0
-  checkpoint_hard_edit_fp_weight: 2.0
+  checkpoint_overcorrection_weight: 0.5
+  checkpoint_hard_edit_fp_weight: 0.5
   checkpoint_length_ratio_weight: 0.25
+  early_stopping_patience: 2
+  oversample_deletion_windows: true
 loss:
   lambda_edit: 1.0
-  lambda_sequence: 0.5
-  lambda_length: 0.3
-  lambda_insertion_count: 0.2
+  lambda_sequence: 0.4
+  lambda_length: 0.25
+  lambda_insertion_count: 0.15
   lambda_trust: 0.1
-  lambda_hard_edit: 0.4
+  lambda_hard_edit: 0.35
   lambda_hard_edit_precision: 0.8
   lambda_selective_hard_edit: 0.2
+  lambda_deletion_candidate: 0.35
+  lambda_deletion_length: 0.15
+  lambda_run_length_aux: 0.1
+  lambda_deletion_positive_reward: 0.1
   lambda_support: 0.0
-  lambda_preserve: 0.15
+  lambda_preserve: 0.2
   lambda_uncertainty: 0.1
   homopolymer_weight_scale: 0.15
   label_smoothing: 0.0
@@ -74,3 +96,7 @@ loss:
   selective_hard_edit_confidence_threshold: 0.6
   selective_hard_edit_uncertainty_threshold: 0.4
   selective_hard_edit_min_support_agreement: 0.93
+  deletion_focal_gamma: 2.0
+  deletion_false_positive_weight: 8.0
+  deletion_false_negative_weight: 1.0
+  deletion_positive_reward_scale: 1.5

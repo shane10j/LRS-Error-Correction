@@ -1,41 +1,49 @@
 model:
-  d_model: 32
+  d_model: 64
   num_heads: 4
-  num_layers: 1
+  num_layers: 2
   ff_mult: 2
   dropout: 0.1
-  support_feature_dim: 12
-  max_supports: 8
+  support_feature_dim: 17
+  max_supports: 16
   max_insertions_per_pos: 2
   conv_kernel_size: 5
   support_mode: full
   apply_hard_edit_support_filter: true
   hard_edit_min_support_agreement: 0.95
   hard_edit_max_support_entropy: 0.15
-  hard_edit_min_support_depth: 2.0
+  hard_edit_min_support_depth: 4.0
   hard_edit_filter_logit_bias: 6.0
   inference_hard_edit_confidence_threshold: 0.9
   inference_hard_edit_temperature: 0.75
 data:
-  train_path: data/real_uti89_notebook/train.jsonl
-  val_path: data/real_uti89_notebook/val.jsonl
-  test_path: data/real_uti89_notebook/test.jsonl
+  train_path: data/giab_trio_benchmark/hg002_primary/stage1_1kb/train.jsonl
+  val_path: data/giab_trio_benchmark/hg002_primary/stage1_1kb/val.jsonl
+  test_path: data/giab_trio_benchmark/hg002_primary/stage1_1kb/test.jsonl
+  manifest_path: data/giab_trio_benchmark/hg002_primary/stage1_1kb/manifest.json
   max_target_len: 1024
-  max_supports: 8
+  max_supports: 16
   max_support_len: 1024
   num_workers: 0
+  region_names:
+  - homopolymer
+  - low_complexity
+  - repeat
+  - segmental_duplication
+  - variant_rich
 train:
   seed: 42
   batch_size: 4
-  epochs: 5
+  epochs: 8
   lr: 0.0001
   weight_decay: 0.01
   grad_clip_norm: 0.5
-  device: cpu
+  device: mps
   mixed_precision: false
   log_every: 20
   eval_every: 1
-  save_dir: checkpoints/real_uti89_notebook
+  save_dir: checkpoints/giab_trio_benchmark/stage1_1kb/full
+  init_checkpoint: ''
   checkpoint_metric: composite_sequence
   checkpoint_metric_mode: max
   checkpoint_overcorrection_weight: 3.0
@@ -51,7 +59,7 @@ loss:
   lambda_hard_edit_precision: 0.8
   lambda_selective_hard_edit: 0.2
   lambda_support: 0.0
-  lambda_preserve: 0.15
+  lambda_preserve: 0.2
   lambda_uncertainty: 0.1
   homopolymer_weight_scale: 0.15
   label_smoothing: 0.0
