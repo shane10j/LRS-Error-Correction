@@ -1,0 +1,80 @@
+name: debug_tiny
+dataset:
+  kind: synthetic
+  sample_id: DEBUG
+  output_dir: outputs/debug_tiny/dataset
+  splits:
+    train: 48
+    val: 16
+    test: 16
+  max_window_length: 64
+  overlap: 8
+  max_support_reads: 6
+  max_deletion_length: 3
+  synthetic_seed: 13
+model:
+  target_only:
+    use_support: false
+  full:
+    use_support: true
+  d_model: 32
+  conv_kernel_size: 5
+  support_hidden_dim: 32
+train:
+  output_dir: outputs/debug_tiny
+  epochs: 6
+  batch_size: 8
+  lr: 0.001
+  patience: 3
+  encourage_edits_schedule:
+    warmup_epochs: 2
+    early_false_positive_penalty_weight: 0.02
+    late_false_positive_penalty_weight: 0.20
+    early_copy_to_sub_penalty_weight: 0.00
+    late_copy_to_sub_penalty_weight: 0.50
+    early_copy_to_del_penalty_weight: 0.00
+    late_copy_to_del_penalty_weight: 0.75
+    early_copy_to_ins_penalty_weight: 0.00
+    late_copy_to_ins_penalty_weight: 0.50
+    early_positive_hard_edit_reward_weight: 0.90
+    late_positive_hard_edit_reward_weight: 0.35
+    early_gate_open_bias: 2.00
+    late_gate_open_bias: 0.00
+    early_trust_regularization_weight: 0.00
+    late_trust_regularization_weight: 0.00
+    early_curriculum_fraction: 0.50
+    late_curriculum_fraction: 1.00
+    soft_decode_thresholds:
+      sub_threshold: 0.10
+      del_threshold: 0.10
+      ins_threshold: 0.10
+      trust_threshold: 0.00
+  class_weights:
+    COPY: 0.3
+    SUB: 3.0
+    DEL: 1.0
+    INS: 2.0
+  delete_candidate_aux_weight: 0.05
+  sub_payload_loss_weight: 1.00
+  ins_payload_loss_weight: 4.00
+  type_margin: 0.50
+  type_margin_weight: 0.60
+  sub_copy_margin: 1.00
+  sub_copy_margin_weight: 1.20
+  sub_del_margin: 1.00
+  sub_del_margin_weight: 1.20
+  ins_del_margin: 0.75
+  ins_del_margin_weight: 0.80
+  non_del_margin: 0.75
+  non_del_margin_weight: 0.75
+  del_fallback_penalty_weight: 0.75
+  hard_copy_penalty_weight: 0.75
+decode:
+  sub_threshold: 0.55
+  del_threshold: 0.60
+  ins_threshold: 0.60
+  trust_threshold: 0.50
+  max_deletion_length: 3
+baseline:
+  consensus_agreement_threshold: 0.75
+  deletion_threshold: 0.70

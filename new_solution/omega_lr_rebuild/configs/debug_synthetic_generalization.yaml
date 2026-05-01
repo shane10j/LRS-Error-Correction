@@ -1,0 +1,178 @@
+name: debug_synthetic_generalization
+regression_targets:
+  notebook_21_full_hybrid:
+    usable_score_min: 0.9722
+    hard_edit_false_positive_rate_max: 0.0
+    overcorrection_rate_max: 0.0
+  notebook_18_full_hybrid:
+    usable_score_min: 0.9722
+    hard_edit_false_positive_rate_max: 0.0
+    overcorrection_rate_max: 0.0
+  notebook_19_full_hybrid:
+    usable_score_min: 0.9722
+    hard_edit_false_positive_rate_max: 0.0
+    overcorrection_rate_max: 0.0
+dataset:
+  kind: synthetic
+  synthetic_suite: harder
+  sample_id: DEBUG
+  output_dir: outputs/debug_synthetic_generalization/dataset
+  splits:
+    train: 68
+    val: 17
+    test: 17
+  max_window_length: 64
+  overlap: 8
+  max_support_reads: 6
+  max_deletion_length: 3
+  synthetic_seed: 31
+  shared_examples_across_splits: false
+model:
+  target_only:
+    use_support: false
+  full:
+    use_support: true
+  d_model: 48
+  conv_kernel_size: 5
+  support_hidden_dim: 48
+  payload_type_coupling_boost: 2.0
+model_debug:
+  use_trust_gate: false
+  use_delete_length_head: false
+train:
+  output_dir: outputs/debug_synthetic_generalization
+  epochs: 12
+  batch_size: 4
+  lr: 0.001
+  patience: 6
+  hard_edit_oversample_factor: 4
+  encourage_edits_schedule:
+    warmup_epochs: 4
+    early_false_positive_penalty_weight: 0.02
+    late_false_positive_penalty_weight: 0.35
+    early_copy_to_sub_penalty_weight: 0.00
+    late_copy_to_sub_penalty_weight: 0.60
+    early_copy_to_del_penalty_weight: 0.00
+    late_copy_to_del_penalty_weight: 0.90
+    early_copy_to_ins_penalty_weight: 0.00
+    late_copy_to_ins_penalty_weight: 0.60
+    early_positive_hard_edit_reward_weight: 1.00
+    late_positive_hard_edit_reward_weight: 0.45
+    early_gate_open_bias: 0.00
+    late_gate_open_bias: 0.00
+    early_trust_regularization_weight: 0.00
+    late_trust_regularization_weight: 0.00
+    early_curriculum_fraction: 1.00
+    late_curriculum_fraction: 1.00
+    soft_decode_thresholds:
+      sub_threshold: 0.05
+      del_threshold: 0.05
+      ins_threshold: 0.05
+      trust_threshold: 0.00
+  class_weights:
+    COPY: 0.6
+    SUB: 3.5
+    DEL: 1.2
+    INS: 2.8
+  delete_candidate_aux_weight: 0.05
+  support_majority_loss_weight: 0.15
+  support_sub_loss_weight: 0.10
+  support_ins_loss_weight: 0.10
+  support_del_loss_weight: 0.10
+  support_rule_type_loss_weight: 2.00
+  rule_copy_margin: 1.50
+  rule_positive_copy_margin_weight: 1.50
+  rule_copy_noncopy_penalty_weight: 1.00
+  rule_copy_safety_margin: 1.50
+  rule_copy_safety_margin_weight: 1.00
+  hybrid_forced_type_loss_weight: 1.50
+  hybrid_forced_margin: 1.75
+  hybrid_forced_copy_margin_weight: 1.50
+  payload_type_margin: 1.00
+  sub_payload_type_consistency_weight: 0.75
+  ins_payload_type_consistency_weight: 0.75
+  no_ins_evidence_copy_to_ins_penalty_weight: 1.75
+  no_ins_evidence_ins_margin: 1.50
+  no_ins_evidence_ins_margin_weight: 1.75
+  ins_payload_base_weights:
+    A: 4.0
+    C: 1.0
+    G: 4.0
+    T: 1.0
+  sub_payload_base_weights:
+    A: 1.0
+    C: 1.0
+    G: 1.0
+    T: 2.0
+  sub_type_activation_base_weights:
+    A: 1.25
+    C: 1.0
+    G: 1.0
+    T: 2.5
+  ins_type_activation_base_weights:
+    A: 2.5
+    C: 1.0
+    G: 2.5
+    T: 1.0
+  sub_payload_loss_weight: 1.50
+  ins_payload_loss_weight: 5.00
+  type_margin: 0.50
+  type_margin_weight: 1.00
+  sub_copy_margin: 1.00
+  sub_copy_margin_weight: 1.50
+  sub_del_margin: 1.00
+  sub_del_margin_weight: 1.50
+  ins_del_margin: 0.75
+  ins_del_margin_weight: 1.00
+  non_del_margin: 0.75
+  non_del_margin_weight: 1.00
+  del_fallback_penalty_weight: 1.00
+  hard_copy_penalty_weight: 1.00
+decode:
+  sub_threshold: 0.05
+  del_threshold: 0.05
+  ins_threshold: 0.05
+  trust_threshold: 0.00
+  max_deletion_length: 3
+  mode: debug
+  use_trust_threshold: false
+  use_delete_candidate_veto: false
+  restrict_supported_candidates: false
+  consistency_check: false
+  full_trace: true
+  hybrid_rule_decode: true
+  hybrid_payload_threshold: 0.50
+  hybrid_sub_payload_threshold: 0.85
+  hybrid_sub_payload_threshold_by_base:
+    A: 0.85
+    C: 0.85
+    G: 0.85
+    T: 0.80
+  hybrid_sub_min_type_prob: 0.05
+  hybrid_sub_min_copy_margin: -0.75
+  hybrid_ins_payload_threshold: 0.60
+  hybrid_ins_payload_threshold_by_base:
+    A: 0.50
+    C: 0.60
+    G: 0.55
+    T: 0.60
+  hybrid_del_threshold: 1
+  hybrid_force_del: true
+  hybrid_negative_veto: true
+  hybrid_negative_veto_min_type_prob: 0.80
+  hybrid_negative_veto_min_payload_prob: 0.98
+  hybrid_negative_veto_min_agreement: 0.95
+  hybrid_negative_veto_min_support_fraction: 0.80
+  hybrid_sub_a_copy_safety: true
+  hybrid_sub_a_copy_veto_min_payload_prob: 0.995
+  hybrid_sub_a_copy_veto_min_agreement: 0.98
+  hybrid_sub_a_copy_veto_min_support_fraction: 0.90
+  support_rule_agreement_threshold: 0.60
+  support_rule_insertion_threshold: 0.50
+  support_rule_deletion_threshold: 0.50
+baseline:
+  consensus_agreement_threshold: 0.75
+  deletion_threshold: 0.70
+  support_rule_agreement_threshold: 0.60
+  support_rule_insertion_threshold: 0.50
+  support_rule_deletion_threshold: 0.50

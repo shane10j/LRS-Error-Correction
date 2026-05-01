@@ -1,0 +1,84 @@
+name: hg002_chr20_small
+dataset:
+  kind: aligned_bam
+  sample_id: HG002
+  bam_path: /Users/shanejayasundera/LRS-Error-Correction/old_solution/data/subsets/hg002_chr20_8x/HG002.giab.subset.bam
+  reference_fasta: /Users/shanejayasundera/LRS-Error-Correction/old_solution/data/subsets/hg002_chr20_truth/HG002_chr20_reference.fa
+  truth_fasta: /Users/shanejayasundera/LRS-Error-Correction/old_solution/data/subsets/hg002_chr20_truth/HG002_chr20_truth.fa
+  truth_vcf: /Users/shanejayasundera/LRS-Error-Correction/old_solution/data/subsets/hg002_chr20_truth/HG002_chr20_benchmark.vcf.gz
+  confident_bed: /Users/shanejayasundera/LRS-Error-Correction/old_solution/data/subsets/hg002_chr20_truth/HG002_chr20_confident.bed
+  output_dir: outputs/hg002_chr20_small/dataset
+  contigs: ["chr20"]
+  max_examples: 1500
+  min_read_length: 10000
+  max_window_length: 256
+  overlap: 64
+  max_support_reads: 12
+  max_deletion_length: 5
+  coverage_label: 8x
+model:
+  target_only:
+    use_support: false
+  full:
+    use_support: true
+  d_model: 64
+  conv_kernel_size: 5
+  support_hidden_dim: 64
+train:
+  output_dir: outputs/hg002_chr20_small
+  epochs: 6
+  batch_size: 4
+  lr: 0.001
+  patience: 2
+  encourage_edits_schedule:
+    warmup_epochs: 2
+    early_false_positive_penalty_weight: 0.03
+    late_false_positive_penalty_weight: 0.20
+    early_copy_to_sub_penalty_weight: 0.00
+    late_copy_to_sub_penalty_weight: 0.50
+    early_copy_to_del_penalty_weight: 0.00
+    late_copy_to_del_penalty_weight: 0.75
+    early_copy_to_ins_penalty_weight: 0.00
+    late_copy_to_ins_penalty_weight: 0.50
+    early_positive_hard_edit_reward_weight: 0.75
+    late_positive_hard_edit_reward_weight: 0.30
+    early_gate_open_bias: 1.25
+    late_gate_open_bias: 0.00
+    early_trust_regularization_weight: 0.00
+    late_trust_regularization_weight: 0.00
+    early_curriculum_fraction: 0.35
+    late_curriculum_fraction: 1.00
+    soft_decode_thresholds:
+      sub_threshold: 0.20
+      del_threshold: 0.20
+      ins_threshold: 0.20
+      trust_threshold: 0.05
+  class_weights:
+    COPY: 0.25
+    SUB: 2.9
+    DEL: 1.2
+    INS: 1.9
+  delete_candidate_aux_weight: 0.05
+  sub_payload_loss_weight: 1.00
+  ins_payload_loss_weight: 4.00
+  type_margin: 0.50
+  type_margin_weight: 0.50
+  sub_copy_margin: 1.00
+  sub_copy_margin_weight: 1.00
+  sub_del_margin: 1.00
+  sub_del_margin_weight: 1.00
+  ins_del_margin: 0.75
+  ins_del_margin_weight: 0.70
+  non_del_margin: 0.75
+  non_del_margin_weight: 0.60
+  del_fallback_penalty_weight: 0.60
+  hard_copy_penalty_weight: 0.60
+decode:
+  sub_threshold: 0.62
+  del_threshold: 0.68
+  ins_threshold: 0.68
+  trust_threshold: 0.58
+  max_deletion_length: 5
+baseline:
+  consensus_agreement_threshold: 0.82
+  deletion_threshold: 0.78
