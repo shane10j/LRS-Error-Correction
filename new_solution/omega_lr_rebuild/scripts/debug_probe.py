@@ -10,6 +10,7 @@ from omega_lr.eval.inspect import (
     argmax_decode_reports,
     classwise_edit_statistics,
     false_sub_diagnostics,
+    false_hard_edit_diagnostics,
     hard_edit_learnability_summary,
     hybrid_gap_report,
     hybrid_miss_diagnostics,
@@ -18,6 +19,7 @@ from omega_lr.eval.inspect import (
     missed_hard_edit_evidence,
     print_argmax_reports,
     print_false_sub_reports,
+    print_false_hard_edit_reports,
     print_hybrid_gap_report,
     print_hybrid_miss_reports,
     print_insertion_payload_reports,
@@ -42,6 +44,7 @@ def main() -> None:
             "hybrid_gap",
             "hybrid_miss",
             "false_sub",
+            "false_hard",
             "ins_payload",
         ],
     )
@@ -116,6 +119,16 @@ def main() -> None:
         )
         print_false_sub_reports(reports)
         save_json(reports, output_dir / "false_sub_probe.json")
+        return
+
+    if args.mode == "false_hard":
+        reports = false_hard_edit_diagnostics(
+            config=config,
+            checkpoint_path=checkpoint,
+            split=args.split,
+        )
+        print_false_hard_edit_reports(reports)
+        save_json(reports, output_dir / "false_hard_probe.json")
         return
 
     if args.mode == "ins_payload":

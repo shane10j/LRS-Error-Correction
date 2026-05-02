@@ -585,6 +585,76 @@ def hybrid_miss_diagnostics(
     return reports
 
 
+def false_hard_edit_diagnostics(
+    config: dict,
+    checkpoint_path: str | Path,
+    split: str = "test",
+) -> list[dict]:
+    """Dump every COPY position where the model emits a hard edit."""
+    model, device = load_model_for_inspection(config, checkpoint_path)
+    dataset_dir = resolve_path(config["dataset"]["output_dir"])
+    _, loader = make_loader(dataset_dir / f"{split}.jsonl", batch_size=1, shuffle=False)
+    reports = []
+    neural_config = deepcopy(config["decode"])
+    neural_config["hybrid_rule_decode"] = False
+    with torch.no_grad():
+        for batch in loader:
+            example = batch["raw_examples"][0]
+            outputs = model(batch["target_tokens"].to(device), batch["pileup_features"].to(device), batch["rule_features"].to(device))
+            length = len(example["target_seq"])
+            sliced = {
+                "type_logits": outputs["type_logits"][0, :length].detach().cpu(),
+                "sub_base_logits": outputs["sub_base_logits"][0, :length].detach().cpu(),
+                "ins_base_logits": outputs["ins_base_logits"][0, :length].detach().cpu(),
+                "edit_logits": outputs["edit_logits"][0, :length].detach().cpu(),
+                "delete_candidate_logits": outputs["delete_candidate_logits"][0, :length].detach().cpu(),
+                "delete_length_logits": outputs["delete_length_logits"][0, :length].detach().cpu(),
+                "trust": outputs["trust"][0, :length].detach().cpu(),
+            }
+            hybrid_decoded = decode_example(example["target_seq"], example, sliced, config["decode"])
+            neural_decoded = decode_example(example["target_seq"], example, sliced, neural_config)
+            type_probs = torch.softmax(sliced["type_logits"], dim=-1)
+            sub_probs = torch.softmax(sliced["sub_base_logits"], dim=-1)
+            ins_probs = torch.softmax(sliced["ins_base_logits"], dim=-1)
+            gold_labels = [_gold_label_name(label) for label in example["edit_labels"]]
+            for pos, gold_label in enumerate(gold_labels):
+                predicted = hybrid_decoded["predicted_labels"][pos] if pos < len(hybrid_decoded["predicted_labels"]) else None
+                if gold_label != "COPY" or predicted == "COPY" or predicted is None:
+                    continue
+                trace = next((item for item in hybrid_decoded["trace"] if item["pos"] == pos), {})
+                support_rule_label = trace.get("support_rule_label")
+                forced_by_rule = bool(trace.get("forced_by_rule", False))
+                if forced_by_rule:
+                    likely_source = "hybrid_forced_by_support_rule"
+                elif support_rule_label and support_rule_label != "COPY":
+                    likely_source = "support_rule_positive_but_not_forced"
+                elif neural_decoded["predicted_labels"][pos] == predicted:
+                    likely_source = "neural_prediction_not_vetoed"
+                else:
+                    likely_source = "decode_alignment_or_trace_mismatch"
+                reports.append(
+                    {
+                        "example_id": example["example_id"],
+                        "pos": pos,
+                        "gold_label": gold_label,
+                        "predicted_label": predicted,
+                        "support_rule_label": support_rule_label,
+                        "neural_only_label": neural_decoded["predicted_labels"][pos] if pos < len(neural_decoded["predicted_labels"]) else None,
+                        "forced_by_rule": forced_by_rule,
+                        "veto_status": trace.get("veto_reasons", []),
+                        "candidate_label": trace.get("candidate_label"),
+                        "likely_source": likely_source,
+                        "support_evidence": _support_evidence(example, pos),
+                        "type_probs": _named_probs(EDIT_TYPE_LABELS, type_probs[pos]),
+                        "sub_base_probs": _named_probs(BASES, sub_probs[pos]),
+                        "ins_base_probs": _named_probs(BASES, ins_probs[pos]),
+                        "ins_payload_diagnostic": _ins_payload_diagnostic(predicted, ins_probs[pos]),
+                        "decoder_trace": trace,
+                    }
+                )
+    return reports
+
+
 def hybrid_gap_report(
     config: dict,
     checkpoint_path: str | Path,
@@ -713,6 +783,28 @@ def print_hybrid_miss_reports(reports: list[dict]) -> None:
         print("  candidate_label        :", report["candidate_label"])
         print("  target_prefix          :", report["target_prefix"])
         print("  truth_prefix           :", report["truth_prefix"])
+        print("  support_evidence       :", report["support_evidence"])
+        print("  type_probs             :", report["type_probs"])
+        print("  sub_base_probs         :", report["sub_base_probs"])
+        print("  ins_base_probs         :", report["ins_base_probs"])
+        if report["ins_payload_diagnostic"] is not None:
+            print("  ins_payload_diagnostic :", report["ins_payload_diagnostic"])
+        print("  decoder_trace          :", report["decoder_trace"])
+
+
+def print_false_hard_edit_reports(reports: list[dict]) -> None:
+    print(f"false_hard_edit_count={len(reports)}")
+    for report in reports:
+        print("=" * 100)
+        print(
+            f"example_id={report['example_id']} pos={report['pos']} "
+            f"gold={report['gold_label']} predicted={report['predicted_label']} "
+            f"support_rule={report['support_rule_label']} neural_only={report['neural_only_label']}"
+        )
+        print("  likely_source          :", report["likely_source"])
+        print("  forced_by_rule         :", report["forced_by_rule"])
+        print("  veto_status            :", report["veto_status"])
+        print("  candidate_label        :", report["candidate_label"])
         print("  support_evidence       :", report["support_evidence"])
         print("  type_probs             :", report["type_probs"])
         print("  sub_base_probs         :", report["sub_base_probs"])

@@ -150,20 +150,20 @@ decode:
   hybrid_del_threshold: 1
   hybrid_force_del: true
   hybrid_negative_veto: true
-  hybrid_negative_veto_min_type_prob: 0.80
-  hybrid_negative_veto_min_payload_prob: 0.98
-  hybrid_negative_veto_min_agreement: 0.95
-  hybrid_negative_veto_min_support_fraction: 0.80
+  hybrid_negative_veto_min_type_prob: 0.95
+  hybrid_negative_veto_min_payload_prob: 0.995
+  hybrid_negative_veto_min_agreement: 0.98
+  hybrid_negative_veto_min_support_fraction: 0.95
   hybrid_sub_a_copy_safety: true
   hybrid_sub_a_copy_veto_min_payload_prob: 0.995
   hybrid_sub_a_copy_veto_min_agreement: 0.98
   hybrid_sub_a_copy_veto_min_support_fraction: 0.90
   support_rule_agreement_threshold: 0.60
   support_rule_insertion_threshold: 0.50
-  support_rule_deletion_threshold: 0.50
+  support_rule_deletion_threshold: 0.75
 baseline:
   consensus_agreement_threshold: 0.75
   deletion_threshold: 0.70
   support_rule_agreement_threshold: 0.60
   support_rule_insertion_threshold: 0.50
-  support_rule_deletion_threshold: 0.50
+  support_rule_deletion_threshold: 0.75
