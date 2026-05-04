@@ -1,11 +1,13 @@
 name: debug_synthetic_generalization_large
 regression_targets:
-  precision_first:
+  notebook_23_large_safety:
+    run_name: full_hybrid
     hard_edit_false_positive_rate_max: 0.0
     overcorrection_rate_max: 0.0
+    usable_score_gt_run: no_edit
 dataset:
   kind: synthetic
-  synthetic_suite: harder_large
+  synthetic_suite: harder_large_noisy
   sample_id: DEBUG
   output_dir: outputs/debug_synthetic_generalization_large/dataset
   splits:
@@ -69,6 +71,12 @@ train:
   support_majority_loss_weight: 0.15
   support_sub_loss_weight: 0.10
   support_ins_loss_weight: 0.10
+  support_ins_base_loss_weight: 1.50
+  support_ins_base_weights:
+    A: 4.0
+    C: 1.0
+    G: 4.0
+    T: 1.0
   support_del_loss_weight: 0.10
   support_rule_type_loss_weight: 2.00
   rule_copy_margin: 1.50
@@ -149,11 +157,43 @@ decode:
     T: 0.60
   hybrid_del_threshold: 1
   hybrid_force_del: true
+  hybrid_rule_force_min_support_fraction: 0.75
+  hybrid_rule_force_min_support_margin: 1.0
+  hybrid_rule_force_max_entropy: 0.95
+  hybrid_rule_force_min_depth: 3
+  hybrid_del_force_min_support_fraction: 0.90
+  hybrid_del_force_min_support_margin: 2.0
+  hybrid_del_force_max_entropy: 0.60
+  hybrid_ins_force_min_support_fraction: 0.666
+  hybrid_ins_force_min_support_margin: 0.0
+  hybrid_ins_force_max_entropy: 1.00
+  hybrid_ins_support_payload_rescue: true
+  hybrid_ins_support_payload_min_fraction: 0.666
+  hybrid_ins_support_payload_min_count: 2
+  hybrid_ins_support_payload_min_depth: 3
+  hybrid_ins_support_payload_max_entropy: 1.00
+  hybrid_ins_support_payload_allow_neighbor: false
+  hybrid_neighbor_min_support_fraction: 0.90
+  hybrid_neighbor_max_entropy: 0.50
+  hybrid_homopolymer_min_support_fraction: 0.90
+  hybrid_adjacent_edit_suppression: true
+  hybrid_adjacent_score_tie_epsilon: 0.05
   hybrid_negative_veto: true
   hybrid_negative_veto_min_type_prob: 0.95
   hybrid_negative_veto_min_payload_prob: 0.995
   hybrid_negative_veto_min_agreement: 0.98
   hybrid_negative_veto_min_support_fraction: 0.95
+  hybrid_require_rule_agreement_for_neural_edits: true
+  hybrid_rule_agree_min_type_prob: 0.75
+  hybrid_rule_agree_min_payload_prob: 0.85
+  hybrid_rule_agree_min_support_fraction: 0.60
+  hybrid_rule_agree_min_agreement: 0.60
+  hybrid_neural_rescue_enabled: true
+  hybrid_neural_rescue_min_type_prob: 0.00
+  hybrid_neural_rescue_min_del_type_prob: 0.50
+  hybrid_neural_rescue_min_payload_prob: 0.95
+  hybrid_neural_rescue_min_support_fraction: 0.666
+  hybrid_neural_rescue_min_agreement: 0.60
   hybrid_sub_a_copy_safety: true
   hybrid_sub_a_copy_veto_min_payload_prob: 0.995
   hybrid_sub_a_copy_veto_min_agreement: 0.98
@@ -161,6 +201,11 @@ decode:
   support_rule_agreement_threshold: 0.60
   support_rule_insertion_threshold: 0.50
   support_rule_deletion_threshold: 0.75
+  support_rule_use_confidence: true
+  support_rule_confidence_min_fraction: 0.75
+  support_rule_confidence_min_margin: 1.0
+  support_rule_confidence_max_entropy: 0.95
+  support_rule_deletion_confidence_min_fraction: 0.90
 baseline:
   consensus_agreement_threshold: 0.75
   deletion_threshold: 0.70

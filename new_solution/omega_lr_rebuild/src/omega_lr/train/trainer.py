@@ -128,7 +128,10 @@ def neural_only_decode_config(decode_config: dict) -> dict:
 
 def hybrid_decode_config(decode_config: dict) -> dict:
     updated = deepcopy(decode_config)
-    updated["hybrid_rule_decode"] = True
+    if updated.get("mode") == "debug":
+        updated["hybrid_rule_decode"] = bool(updated.get("hybrid_rule_decode", False))
+    else:
+        updated["hybrid_rule_decode"] = True
     return updated
 
 

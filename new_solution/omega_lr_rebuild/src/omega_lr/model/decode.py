@@ -43,7 +43,8 @@ def _supported_sub_bases(example: dict, pos: int) -> list[int]:
 def _supported_ins_bases(example: dict, pos: int) -> list[int]:
     if example["features"]["support_ins_count"][pos] <= 0:
         return []
-    supported = [idx for idx, count in enumerate(example["features"]["support_base_counts"][pos]) if count > 0]
+    ins_counts = example["features"].get("support_ins_base_counts", [])
+    supported = [idx for idx, count in enumerate(ins_counts[pos])] if pos < len(ins_counts) else []
     if supported:
         return supported
     majority_idx = max(range(4), key=lambda idx: example["features"]["support_base_counts"][pos][idx])
@@ -119,6 +120,152 @@ def _support_majority_base(example: dict, pos: int) -> tuple[str, float]:
     return BASES[best_idx], _support_fraction(example, pos, float(counts[best_idx]))
 
 
+def _support_rule_confidence(example: dict, pos: int, rule_label: str) -> dict:
+    features = example["features"]
+    counts = list(features["support_base_counts"][pos])
+    depth = max(float(features["support_depth"][pos]), 1.0)
+    sorted_counts = sorted(counts, reverse=True)
+    top_count = float(sorted_counts[0]) if sorted_counts else 0.0
+    second_count = float(sorted_counts[1]) if len(sorted_counts) > 1 else 0.0
+    support_value = top_count
+    if rule_label.startswith("INS_"):
+        support_value = float(features["support_ins_count"][pos])
+    elif rule_label == "DEL":
+        support_value = float(features["support_del_count"][pos])
+    neighbor_radius = 1
+    gold_labels = example.get("edit_labels", [])
+    nearby_gold_hard = any(
+        idx != pos and 0 <= idx < len(gold_labels) and EDIT_LABELS[int(gold_labels[idx])] != "COPY"
+        for idx in range(pos - neighbor_radius, pos + neighbor_radius + 1)
+    )
+    return {
+        "support_margin": top_count - second_count,
+        "support_fraction": support_value / depth,
+        "del_fraction": float(features["support_del_count"][pos]) / depth,
+        "base_top_fraction": top_count / depth,
+        "local_entropy": float(features["support_entropy"][pos]),
+        "support_depth": depth,
+        "homopolymer_run_length": int(features.get("homopolymer_run_length", [1] * len(example["target_seq"]))[pos]),
+        "tandem_repeat_flag": int(features.get("tandem_repeat_flag", [0] * len(example["target_seq"]))[pos]),
+        "neighbor_edit_proximity": 1 if nearby_gold_hard or "neighbor" in example.get("example_id", "") else 0,
+    }
+
+
+def _rule_confidence_passes(confidence: dict, rule_label: str, decode_config: dict) -> tuple[bool, list[str]]:
+    reasons = []
+    min_fraction = float(decode_config.get("hybrid_rule_force_min_support_fraction", 0.67))
+    min_margin = float(decode_config.get("hybrid_rule_force_min_support_margin", 1.0))
+    max_entropy = float(decode_config.get("hybrid_rule_force_max_entropy", 1.25))
+    min_depth = float(decode_config.get("hybrid_rule_force_min_depth", 3.0))
+    if rule_label == "DEL":
+        min_fraction = float(decode_config.get("hybrid_del_force_min_support_fraction", min_fraction))
+        min_margin = float(decode_config.get("hybrid_del_force_min_support_margin", min_margin))
+        max_entropy = float(decode_config.get("hybrid_del_force_max_entropy", max_entropy))
+    elif rule_label.startswith("INS_"):
+        min_fraction = float(decode_config.get("hybrid_ins_force_min_support_fraction", min_fraction))
+        min_margin = float(decode_config.get("hybrid_ins_force_min_support_margin", min_margin))
+        max_entropy = float(decode_config.get("hybrid_ins_force_max_entropy", max_entropy))
+    if confidence["neighbor_edit_proximity"]:
+        min_fraction = max(min_fraction, float(decode_config.get("hybrid_neighbor_min_support_fraction", 0.80)))
+        max_entropy = min(max_entropy, float(decode_config.get("hybrid_neighbor_max_entropy", 0.90)))
+    if confidence["homopolymer_run_length"] >= 4:
+        min_fraction = max(min_fraction, float(decode_config.get("hybrid_homopolymer_min_support_fraction", 0.80)))
+    if confidence["support_depth"] < min_depth:
+        reasons.append("rule_low_depth")
+    if confidence["support_fraction"] < min_fraction:
+        reasons.append("rule_low_support_fraction")
+    if confidence["support_margin"] < min_margin and rule_label.startswith("SUB_"):
+        reasons.append("rule_low_margin")
+    if confidence["local_entropy"] > max_entropy:
+        reasons.append("rule_high_entropy")
+    return not reasons, reasons
+
+
+def _support_insertion_payload(example: dict, pos: int) -> tuple[int | None, float, float]:
+    ins_counts = example["features"].get("support_ins_base_counts", [])
+    if pos >= len(ins_counts) or sum(ins_counts[pos]) <= 0:
+        return None, 0.0, 0.0
+    best_id = max(range(4), key=lambda idx: ins_counts[pos][idx])
+    depth = max(float(example["features"]["support_depth"][pos]), 1.0)
+    return best_id, float(ins_counts[pos][best_id]) / depth, float(ins_counts[pos][best_id])
+
+
+def _insertion_rule_rescue_allows(example: dict, pos: int, rule_label: str, confidence: dict, decode_config: dict) -> tuple[bool, list[str]]:
+    if not decode_config.get("hybrid_ins_support_payload_rescue", False) or not rule_label.startswith("INS_"):
+        return False, []
+    reasons = []
+    rule_base_id = BASES.index(rule_label[-1])
+    support_base_id, support_fraction, support_count = _support_insertion_payload(example, pos)
+    min_fraction = float(decode_config.get("hybrid_ins_support_payload_min_fraction", 2.0 / 3.0))
+    min_count = float(decode_config.get("hybrid_ins_support_payload_min_count", 2.0))
+    min_depth = float(decode_config.get("hybrid_ins_support_payload_min_depth", 3.0))
+    max_entropy = float(decode_config.get("hybrid_ins_support_payload_max_entropy", 1.0))
+    if support_base_id != rule_base_id:
+        reasons.append("hybrid_ins_support_payload_mismatch")
+    if support_fraction < min_fraction:
+        reasons.append("hybrid_ins_support_payload_low_fraction")
+    if support_count < min_count:
+        reasons.append("hybrid_ins_support_payload_low_count")
+    if confidence["support_depth"] < min_depth:
+        reasons.append("hybrid_ins_support_payload_low_depth")
+    if confidence["local_entropy"] > max_entropy:
+        reasons.append("hybrid_ins_support_payload_high_entropy")
+    if confidence["neighbor_edit_proximity"] and not decode_config.get("hybrid_ins_support_payload_allow_neighbor", False):
+        reasons.append("hybrid_ins_support_payload_neighbor_conflict")
+    return not reasons, reasons
+
+
+def _remove_rule_confidence_reasons(veto_reasons: list[str]) -> list[str]:
+    return [reason for reason in veto_reasons if not reason.startswith("rule_")]
+
+
+def _rebuild_prediction(target_seq: str, labels: list[str]) -> str:
+    corrected = []
+    pos = 0
+    while pos < len(target_seq):
+        label = labels[pos] if pos < len(labels) else "COPY"
+        if label == "COPY":
+            corrected.append(target_seq[pos])
+        elif label.startswith("SUB_"):
+            corrected.append(label[-1])
+        elif label.startswith("INS_"):
+            corrected.append(target_seq[pos])
+            corrected.append(label[-1])
+        elif label == "DEL":
+            pass
+        else:
+            corrected.append(target_seq[pos])
+        pos += 1
+    return "".join(corrected)
+
+
+def _apply_adjacent_parsimony(target_seq: str, labels: list[str], trace: list[dict], decode_config: dict) -> tuple[str, list[str], list[dict]]:
+    if not decode_config.get("hybrid_adjacent_edit_suppression", False) or not trace:
+        return _rebuild_prediction(target_seq, labels), labels, trace
+    updated = list(labels)
+    trace_by_pos = {item["pos"]: item for item in trace}
+    for pos in range(1, len(updated)):
+        if updated[pos] == "COPY" or updated[pos - 1] == "COPY":
+            continue
+        current = trace_by_pos.get(pos, {})
+        previous = trace_by_pos.get(pos - 1, {})
+        current_conf = current.get("rule_confidence", {})
+        previous_conf = previous.get("rule_confidence", {})
+        current_score = float(current_conf.get("support_fraction", current.get("label_score", 0.0)))
+        previous_score = float(previous_conf.get("support_fraction", previous.get("label_score", 0.0)))
+        keep_pos, drop_pos = (pos, pos - 1) if current_score > previous_score else (pos - 1, pos)
+        if abs(current_score - previous_score) <= float(decode_config.get("hybrid_adjacent_score_tie_epsilon", 0.05)):
+            drop_pos = pos
+        updated[drop_pos] = "COPY"
+        if drop_pos in trace_by_pos:
+            trace_by_pos[drop_pos]["veto_reasons"] = list(trace_by_pos[drop_pos].get("veto_reasons", [])) + [
+                "hybrid_adjacent_parsimony_veto"
+            ]
+            trace_by_pos[drop_pos]["final_label"] = "COPY"
+            trace_by_pos[drop_pos]["local_rerank_kept_neighbor"] = keep_pos
+    return _rebuild_prediction(target_seq, updated), updated, trace
+
+
 def _strong_negative_veto_escape(
     chosen_label: str,
     example: dict,
@@ -168,6 +315,98 @@ def _strong_negative_veto_escape(
     return True
 
 
+def _strong_rule_agreeing_neural_edit(
+    rule_label: str,
+    chosen_label: str,
+    example: dict,
+    pos: int,
+    type_probs: torch.Tensor,
+    sub_base_probs: torch.Tensor,
+    ins_base_probs: torch.Tensor,
+    decode_config: dict,
+) -> bool:
+    if rule_label != chosen_label or chosen_label == "COPY":
+        return False
+    min_type_prob = float(decode_config.get("hybrid_rule_agree_min_type_prob", 0.75))
+    min_payload_prob = float(decode_config.get("hybrid_rule_agree_min_payload_prob", 0.85))
+    min_support_fraction = float(decode_config.get("hybrid_rule_agree_min_support_fraction", 0.60))
+    min_agreement = float(decode_config.get("hybrid_rule_agree_min_agreement", 0.60))
+    agreement = float(example["features"]["support_agreement"][pos])
+
+    if chosen_label.startswith("SUB_"):
+        base = chosen_label[-1]
+        majority_base, majority_fraction = _support_majority_base(example, pos)
+        base_id = BASES.index(base)
+        return (
+            majority_base == base
+            and agreement >= min_agreement
+            and majority_fraction >= min_support_fraction
+            and float(type_probs[pos, EDIT_TYPE_LABELS.index("SUB")].item()) >= min_type_prob
+            and float(sub_base_probs[pos, base_id].item()) >= min_payload_prob
+        )
+    if chosen_label.startswith("INS_"):
+        base_id = BASES.index(chosen_label[-1])
+        ins_fraction = _support_fraction(example, pos, float(example["features"]["support_ins_count"][pos]))
+        return (
+            ins_fraction >= min_support_fraction
+            and float(type_probs[pos, EDIT_TYPE_LABELS.index("INS")].item()) >= min_type_prob
+            and float(ins_base_probs[pos, base_id].item()) >= min_payload_prob
+        )
+    if chosen_label == "DEL":
+        del_fraction = _support_fraction(example, pos, float(example["features"]["support_del_count"][pos]))
+        return (
+            del_fraction >= min_support_fraction
+            and float(type_probs[pos, EDIT_TYPE_LABELS.index("DEL")].item()) >= min_type_prob
+        )
+    return False
+
+
+def _neural_rescue_allows(
+    rule_label: str,
+    example: dict,
+    pos: int,
+    type_probs: torch.Tensor,
+    sub_base_probs: torch.Tensor,
+    ins_base_probs: torch.Tensor,
+    decode_config: dict,
+) -> bool:
+    """Allow borderline support-rule edits only when payload and support agree."""
+    if not decode_config.get("hybrid_neural_rescue_enabled", False) or rule_label == "COPY":
+        return False
+    min_type_prob = float(decode_config.get("hybrid_neural_rescue_min_type_prob", 0.0))
+    min_del_type_prob = float(decode_config.get("hybrid_neural_rescue_min_del_type_prob", min_type_prob))
+    min_payload_prob = float(decode_config.get("hybrid_neural_rescue_min_payload_prob", 0.95))
+    min_support_fraction = float(decode_config.get("hybrid_neural_rescue_min_support_fraction", 0.60))
+    min_agreement = float(decode_config.get("hybrid_neural_rescue_min_agreement", 0.60))
+    confidence = _support_rule_confidence(example, pos, rule_label)
+    agreement = float(example["features"]["support_agreement"][pos])
+
+    if rule_label.startswith("SUB_"):
+        base = rule_label[-1]
+        base_id = BASES.index(base)
+        majority_base, majority_fraction = _support_majority_base(example, pos)
+        return (
+            majority_base == base
+            and confidence["support_fraction"] >= min_support_fraction
+            and agreement >= min_agreement
+            and float(sub_base_probs[pos, base_id].item()) >= min_payload_prob
+            and float(type_probs[pos, EDIT_TYPE_LABELS.index("SUB")].item()) >= min_type_prob
+        )
+    if rule_label.startswith("INS_"):
+        base_id = BASES.index(rule_label[-1])
+        return (
+            confidence["support_fraction"] >= min_support_fraction
+            and float(ins_base_probs[pos, base_id].item()) >= min_payload_prob
+            and float(type_probs[pos, EDIT_TYPE_LABELS.index("INS")].item()) >= min_type_prob
+        )
+    if rule_label == "DEL":
+        return (
+            confidence["del_fraction"] >= min_support_fraction
+            and float(type_probs[pos, EDIT_TYPE_LABELS.index("DEL")].item()) >= min_del_type_prob
+        )
+    return False
+
+
 def _decode_structured(target_seq: str, example: dict, outputs: dict, decode_config: dict, argmax_only: bool) -> dict:
     flags = _mode_flags(decode_config)
     type_probs = torch.softmax(outputs["type_logits"], dim=-1)
@@ -191,7 +430,10 @@ def _decode_structured(target_seq: str, example: dict, outputs: dict, decode_con
         supported_payload_ids = []
         veto_reasons = []
         forced_by_rule = False
+        rescued_by_neural = False
+        rescued_by_support_payload = False
         rule_label = "COPY"
+        rule_confidence = {}
 
         if edit_type == "SUB":
             supported_payload_ids = _supported_sub_bases(example, pos) if flags["restrict_supported_candidates"] else []
@@ -214,6 +456,8 @@ def _decode_structured(target_seq: str, example: dict, outputs: dict, decode_con
 
         if decode_config.get("hybrid_rule_decode", False):
             rule_label = _support_rule_label(example, pos, decode_config)
+            rule_confidence = _support_rule_confidence(example, pos, rule_label)
+            rule_confident, rule_confidence_reasons = _rule_confidence_passes(rule_confidence, rule_label, decode_config)
             if rule_label.startswith("SUB_"):
                 hybrid_sub_payload_threshold = decode_config.get(
                     "hybrid_sub_payload_threshold",
@@ -234,6 +478,8 @@ def _decode_structured(target_seq: str, example: dict, outputs: dict, decode_con
                 copy_type_prob = float(type_probs[pos, EDIT_TYPE_LABELS.index("COPY")].item())
                 sub_copy_margin = sub_type_prob - copy_type_prob
                 if (
+                    rule_confident
+                    and
                     payload_base_id == rule_base_id
                     and payload_score >= hybrid_sub_payload_threshold
                     and (
@@ -246,12 +492,30 @@ def _decode_structured(target_seq: str, example: dict, outputs: dict, decode_con
                     veto_reasons = []
                     forced_by_rule = True
                 else:
+                    if not rule_confident:
+                        veto_reasons.extend(rule_confidence_reasons)
                     if payload_base_id != rule_base_id:
                         veto_reasons.append("hybrid_sub_payload_mismatch")
                     if payload_score < hybrid_sub_payload_threshold:
                         veto_reasons.append("hybrid_sub_payload_threshold")
                     if sub_type_prob < hybrid_sub_min_type_prob and sub_copy_margin < hybrid_sub_min_copy_margin:
                         veto_reasons.append("hybrid_sub_type_too_low")
+                    if (
+                        payload_base_id == rule_base_id
+                        and _neural_rescue_allows(
+                            rule_label,
+                            example,
+                            pos,
+                            type_probs,
+                            sub_base_probs,
+                            ins_base_probs,
+                            decode_config,
+                        )
+                    ):
+                        chosen_label = rule_label
+                        label_score = sub_type_prob * payload_score
+                        veto_reasons = _remove_rule_confidence_reasons(veto_reasons)
+                        rescued_by_neural = True
             elif rule_label.startswith("INS_"):
                 hybrid_ins_payload_threshold = decode_config.get(
                     "hybrid_ins_payload_threshold",
@@ -266,26 +530,73 @@ def _decode_structured(target_seq: str, example: dict, outputs: dict, decode_con
                     float(hybrid_ins_payload_threshold),
                 )
                 payload_base_id, payload_score = _choose_base(ins_base_probs[pos], None)
-                if payload_base_id == rule_base_id and payload_score >= hybrid_ins_payload_threshold:
+                support_payload_allows, support_payload_reasons = _insertion_rule_rescue_allows(
+                    example, pos, rule_label, rule_confidence, decode_config
+                )
+                if support_payload_allows:
+                    chosen_label = rule_label
+                    support_payload_id, support_payload_fraction, _ = _support_insertion_payload(example, pos)
+                    label_score = support_payload_fraction
+                    payload_base_id = support_payload_id
+                    payload_score = support_payload_fraction
+                    veto_reasons = []
+                    forced_by_rule = True
+                    rescued_by_support_payload = True
+                elif rule_confident and payload_base_id == rule_base_id and payload_score >= hybrid_ins_payload_threshold:
                     chosen_label = rule_label
                     label_score = float(type_probs[pos, EDIT_TYPE_LABELS.index("INS")].item()) * payload_score
                     veto_reasons = []
                     forced_by_rule = True
                 else:
+                    if not rule_confident:
+                        veto_reasons.extend(rule_confidence_reasons)
+                    veto_reasons.extend(support_payload_reasons)
                     if payload_base_id != rule_base_id:
                         veto_reasons.append("hybrid_ins_payload_mismatch")
                     if payload_score < hybrid_ins_payload_threshold:
                         veto_reasons.append("hybrid_ins_payload_threshold")
+                    if (
+                        payload_base_id == rule_base_id
+                        and _neural_rescue_allows(
+                            rule_label,
+                            example,
+                            pos,
+                            type_probs,
+                            sub_base_probs,
+                            ins_base_probs,
+                            decode_config,
+                        )
+                    ):
+                        chosen_label = rule_label
+                        label_score = float(type_probs[pos, EDIT_TYPE_LABELS.index("INS")].item()) * payload_score
+                        veto_reasons = _remove_rule_confidence_reasons(veto_reasons)
+                        rescued_by_neural = True
             elif rule_label == "DEL" and decode_config.get("hybrid_force_del", True):
                 hybrid_del_threshold = decode_config.get("hybrid_del_threshold", 0.0)
                 del_support = example["features"]["support_del_count"][pos]
-                if del_support >= hybrid_del_threshold:
+                if rule_confident and del_support >= hybrid_del_threshold:
                     chosen_label = "DEL"
                     label_score = float(type_probs[pos, EDIT_TYPE_LABELS.index("DEL")].item())
                     veto_reasons = []
                     forced_by_rule = True
                 else:
-                    veto_reasons.append("hybrid_del_threshold")
+                    if not rule_confident:
+                        veto_reasons.extend(rule_confidence_reasons)
+                    if del_support < hybrid_del_threshold:
+                        veto_reasons.append("hybrid_del_threshold")
+                    if del_support >= hybrid_del_threshold and _neural_rescue_allows(
+                        rule_label,
+                        example,
+                        pos,
+                        type_probs,
+                        sub_base_probs,
+                        ins_base_probs,
+                        decode_config,
+                    ):
+                        chosen_label = "DEL"
+                        label_score = float(type_probs[pos, EDIT_TYPE_LABELS.index("DEL")].item())
+                        veto_reasons = _remove_rule_confidence_reasons(veto_reasons)
+                        rescued_by_neural = True
             elif (
                 rule_label == "COPY"
                 and chosen_label != "COPY"
@@ -317,6 +628,24 @@ def _decode_structured(target_seq: str, example: dict, outputs: dict, decode_con
                 )
             ):
                 veto_reasons.append("hybrid_sub_a_safety_veto")
+
+            if (
+                chosen_label != "COPY"
+                and not forced_by_rule
+                and not rescued_by_neural
+                and decode_config.get("hybrid_require_rule_agreement_for_neural_edits", False)
+                and not _strong_rule_agreeing_neural_edit(
+                    rule_label,
+                    chosen_label,
+                    example,
+                    pos,
+                    type_probs,
+                    sub_base_probs,
+                    ins_base_probs,
+                    decode_config,
+                )
+            ):
+                veto_reasons.append("hybrid_rule_agreement_confidence_veto")
 
         if not argmax_only and not forced_by_rule:
             if chosen_label.startswith("SUB_") and label_score < decode_config["sub_threshold"]:
@@ -374,16 +703,22 @@ def _decode_structured(target_seq: str, example: dict, outputs: dict, decode_con
                     "candidate_label": chosen_label,
                     "final_label": final_label,
                     "support_rule_label": rule_label,
+                    "rule_confidence": rule_confidence,
                     "label_score": round(label_score, 4),
                     "supported_payload_ids": [ID_TO_BASE[idx] for idx in supported_payload_ids],
                     "veto_reasons": veto_reasons,
                     "forced_by_rule": forced_by_rule,
+                    "rescued_by_neural": rescued_by_neural,
+                    "rescued_by_support_payload": rescued_by_support_payload,
                     "delete_length": delete_length,
                 }
             )
 
+    prediction = "".join(corrected)
+    if not argmax_only:
+        prediction, predicted_labels, trace = _apply_adjacent_parsimony(target_seq, predicted_labels, trace, decode_config)
     return {
-        "prediction": "".join(corrected),
+        "prediction": prediction,
         "predicted_labels": predicted_labels,
         "trust": [float(value) for value in trust[: len(target_seq)].detach().cpu().tolist()],
         "edit_probs": flat_edit_probs[: len(target_seq)].detach().cpu().tolist(),

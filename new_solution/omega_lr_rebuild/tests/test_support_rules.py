@@ -8,11 +8,13 @@ class SupportRuleTests(unittest.TestCase):
     def test_support_rule_labels_capture_sub_ins_del_evidence(self):
         features = {
             "support_base_counts": [[0, 2, 1, 0], [1, 0, 0, 0], [0, 0, 0, 0]],
+            "support_ins_base_counts": [[0, 0, 0, 0], [0, 0, 2, 0], [0, 0, 0, 0]],
             "support_ins_count": [0, 2, 0],
             "support_del_count": [0, 0, 2],
         }
         labels = derive_support_rule_labels("AGT", features)
         self.assertEqual(labels["support_majority_base"], [1, 0, 3])
+        self.assertEqual(labels["support_inserted_base"], [1, 2, 3])
         self.assertEqual(labels["support_suggests_sub"], [1, 1, 0])
         self.assertEqual(labels["support_suggests_ins"], [0, 1, 0])
         self.assertEqual(labels["support_suggests_del"], [0, 0, 1])

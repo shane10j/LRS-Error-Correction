@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -14,6 +15,7 @@ from pathlib import Path
 import yaml
 
 from omega_lr.utils import ensure_dir, read_config, save_json
+from omega_lr.constants import ID_TO_EDIT
 
 
 def run(project_root: Path, *args: str) -> None:
@@ -40,9 +42,13 @@ def seed_config(base: dict, seed: int, output_root: Path, train_examples: int | 
 
 
 def load_record(path: Path) -> dict:
-    import json
-
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def load_jsonl(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def file_md5(path: Path) -> str | None:
@@ -74,6 +80,72 @@ def compact_run_metrics(record: dict) -> dict:
         }
         compact[run_name]["confusion_matrix"] = run_record.get("test_summary", {}).get("confusion_matrix", {})
     return compact
+
+
+def label_family(label: str) -> str:
+    if label.startswith("SUB_"):
+        return "SUB"
+    if label.startswith("INS_"):
+        return "INS"
+    if label == "DEL":
+        return "DEL"
+    return "COPY"
+
+
+def seed_metric_table_row(seed: str, row: dict) -> dict:
+    dataset_dir = Path(row["output_dir"]) / "dataset"
+    summary_path = Path(row["summary"])
+    test_rows = load_jsonl(dataset_dir / "test.jsonl")
+    predictions = load_jsonl(Path(row["output_dir"]) / "full" / "test_predictions.jsonl")
+    counts = {"COPY": 0, "SUB": 0, "INS": 0, "DEL": 0}
+    corrected_edits = 0
+    missed_edits = 0
+    false_edits = 0
+    for example, prediction in zip(test_rows, predictions):
+        gold_labels = [ID_TO_EDIT[int(label)] for label in example["edit_labels"]]
+        predicted_labels = prediction.get("predicted_labels", [])
+        for pos, gold in enumerate(gold_labels):
+            pred = predicted_labels[pos] if pos < len(predicted_labels) else "COPY"
+            family = label_family(gold)
+            counts[family] += 1
+            if gold != "COPY" and pred == gold:
+                corrected_edits += 1
+            elif gold != "COPY" and pred != gold:
+                missed_edits += 1
+            elif gold == "COPY" and pred != "COPY":
+                false_edits += 1
+    summary = load_record(summary_path) if summary_path.exists() else {}
+    full_record = (summary.get("runs") or {}).get("full_hybrid") or {}
+    no_edit_record = (summary.get("runs") or {}).get("no_edit") or {}
+    no_edit_usable = no_edit_record.get("usable_score")
+    target_only_record = (summary.get("runs") or {}).get("target_only") or {}
+    target_only_usable = target_only_record.get("usable_score")
+    full_usable = full_record.get("usable_score")
+    return {
+        "seed": int(seed),
+        "test_dataset_hash": file_md5(dataset_dir / "test.jsonl"),
+        "position_counts": counts,
+        "corrected_edits": corrected_edits,
+        "missed_edits": missed_edits,
+        "false_edits": false_edits,
+        "identity": full_record.get("identity"),
+        "usable_score": full_usable,
+        "no_edit_usable_score": no_edit_usable,
+        "target_only_usable_score": target_only_usable,
+        "full_minus_target_only_usable": (
+            full_usable - target_only_usable
+            if full_usable is not None and target_only_usable is not None
+            else None
+        ),
+        "target_only_equals_full_hybrid": (
+            abs(full_usable - target_only_usable) < 1e-12
+            if full_usable is not None and target_only_usable is not None
+            else None
+        ),
+        "beats_no_edit": full_usable is not None and no_edit_usable is not None and full_usable > no_edit_usable,
+        "zero_false_edits": false_edits == 0,
+        "corrects_more_than_two_edits": corrected_edits > 2,
+    }
 
 
 def build_audit(index: dict, records: list[dict], output_root: Path) -> dict:
@@ -109,10 +181,24 @@ def build_audit(index: dict, records: list[dict], output_root: Path) -> dict:
     uniqueness["summary_file_unique_count"] = len(set(summary_hashes))
     uniqueness["metric_records_unique"] = len(set(metric_digests)) == len(metric_digests)
     uniqueness["metric_record_unique_count"] = len(set(metric_digests))
+    seed_table = [seed_metric_table_row(seed, row) for seed, row in index.items()]
+    fast_gate = [
+        {
+            "seed": row["seed"],
+            "beats_no_edit": row["beats_no_edit"],
+            "zero_false_edits": row["zero_false_edits"],
+            "corrects_more_than_two_edits": row["corrects_more_than_two_edits"],
+            "corrected_edits": row["corrected_edits"],
+            "false_edits": row["false_edits"],
+        }
+        for row in seed_table
+    ]
     audit = {
         "output_root": str(output_root),
         "num_seed_records": len(seed_records),
         "uniqueness": uniqueness,
+        "seed_table": seed_table,
+        "fast_noisy_gate": fast_gate,
         "seed_records": seed_records,
     }
     if records and not uniqueness["metric_records_unique"]:
@@ -191,6 +277,78 @@ def main() -> None:
                     str(checkpoint),
                     "--mode",
                     "false_hard",
+                    "--run-output-dir",
+                    str(full_dir),
+                )
+                run(
+                    project_root,
+                    "scripts/debug_probe.py",
+                    "--config",
+                    str(config_path),
+                    "--checkpoint",
+                    str(checkpoint),
+                    "--mode",
+                    "vetoed_true",
+                    "--run-output-dir",
+                    str(full_dir),
+                )
+                run(
+                    project_root,
+                    "scripts/debug_probe.py",
+                    "--config",
+                    str(config_path),
+                    "--checkpoint",
+                    str(checkpoint),
+                    "--mode",
+                    "ins_payload",
+                    "--run-output-dir",
+                    str(full_dir),
+                )
+                run(
+                    project_root,
+                    "scripts/debug_probe.py",
+                    "--config",
+                    str(config_path),
+                    "--checkpoint",
+                    str(checkpoint),
+                    "--mode",
+                    "support_rule_audit",
+                    "--run-output-dir",
+                    str(full_dir),
+                )
+                run(
+                    project_root,
+                    "scripts/debug_probe.py",
+                    "--config",
+                    str(config_path),
+                    "--checkpoint",
+                    str(checkpoint),
+                    "--mode",
+                    "rule_calibration",
+                    "--run-output-dir",
+                    str(full_dir),
+                )
+                run(
+                    project_root,
+                    "scripts/debug_probe.py",
+                    "--config",
+                    str(config_path),
+                    "--checkpoint",
+                    str(checkpoint),
+                    "--mode",
+                    "hybrid_miss",
+                    "--run-output-dir",
+                    str(full_dir),
+                )
+                run(
+                    project_root,
+                    "scripts/debug_probe.py",
+                    "--config",
+                    str(config_path),
+                    "--checkpoint",
+                    str(checkpoint),
+                    "--mode",
+                    "calibration_gap",
                     "--run-output-dir",
                     str(full_dir),
                 )

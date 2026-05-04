@@ -135,6 +135,7 @@ def compute_losses(batch: dict, outputs: dict, config: dict, device: torch.devic
         delete_length_loss = torch.tensor(0.0, device=device)
 
     support_majority_labels = batch.get("support_majority_base_labels", torch.zeros_like(edit_labels)).to(device)
+    support_inserted_base_labels = batch.get("support_inserted_base_labels", torch.zeros_like(edit_labels)).to(device).clamp(min=0, max=3)
     support_sub_labels = batch.get("support_suggests_sub_labels", torch.zeros_like(mask)).to(device)
     support_ins_labels = batch.get("support_suggests_ins_labels", torch.zeros_like(mask)).to(device)
     support_del_labels = batch.get("support_suggests_del_labels", torch.zeros_like(mask)).to(device)
@@ -163,6 +164,21 @@ def compute_losses(batch: dict, outputs: dict, config: dict, device: torch.devic
         if "support_suggests_ins_logits" in outputs
         else torch.tensor(0.0, device=device)
     )
+    support_ins_base_positions = (support_ins_labels > 0.5) & (mask > 0.5)
+    if support_ins_base_positions.any():
+        support_ins_base_losses = F.cross_entropy(
+            outputs["ins_base_logits"][support_ins_base_positions],
+            support_inserted_base_labels[support_ins_base_positions],
+            reduction="none",
+        )
+        support_ins_base_weights = base_position_weights(
+            support_inserted_base_labels[support_ins_base_positions],
+            config["train"].get("support_ins_base_weights", config["train"].get("ins_payload_base_weights", {})),
+            device,
+        )
+        support_ins_base_loss = weighted_masked_mean(support_ins_base_losses, support_ins_base_weights)
+    else:
+        support_ins_base_loss = torch.tensor(0.0, device=device)
     support_del_loss = (
         masked_bce(outputs["support_suggests_del_logits"], support_del_labels)
         if "support_suggests_del_logits" in outputs
@@ -279,7 +295,7 @@ def compute_losses(batch: dict, outputs: dict, config: dict, device: torch.devic
             torch.relu(payload_type_margin - (ins_logits[ins_payload_support] - copy_logits[ins_payload_support]))
             * max_ins_probs[ins_payload_support],
             base_position_weights(
-                ins_base_labels[ins_payload_support],
+                support_inserted_base_labels[ins_payload_support],
                 config["train"].get("ins_type_activation_base_weights", {}),
                 device,
             ),
@@ -387,6 +403,7 @@ def compute_losses(batch: dict, outputs: dict, config: dict, device: torch.devic
         + support_loss_scale * schedule.get("support_majority_loss_weight", config["train"].get("support_majority_loss_weight", 0.0)) * support_majority_loss
         + support_loss_scale * schedule.get("support_sub_loss_weight", config["train"].get("support_sub_loss_weight", 0.0)) * support_sub_loss
         + support_loss_scale * schedule.get("support_ins_loss_weight", config["train"].get("support_ins_loss_weight", 0.0)) * support_ins_loss
+        + support_loss_scale * schedule.get("support_ins_base_loss_weight", config["train"].get("support_ins_base_loss_weight", 0.0)) * support_ins_base_loss
         + support_loss_scale * schedule.get("support_del_loss_weight", config["train"].get("support_del_loss_weight", 0.0)) * support_del_loss
         + support_loss_scale * schedule.get("support_rule_type_loss_weight", config["train"].get("support_rule_type_loss_weight", 0.0)) * support_rule_type_loss
         + support_loss_scale * schedule.get("rule_positive_copy_margin_weight", config["train"].get("rule_positive_copy_margin_weight", 0.0)) * rule_positive_copy_margin_loss
@@ -422,6 +439,7 @@ def compute_losses(batch: dict, outputs: dict, config: dict, device: torch.devic
         "support_majority_loss": support_majority_loss.detach(),
         "support_sub_loss": support_sub_loss.detach(),
         "support_ins_loss": support_ins_loss.detach(),
+        "support_ins_base_loss": support_ins_base_loss.detach(),
         "support_del_loss": support_del_loss.detach(),
         "support_rule_type_loss": support_rule_type_loss.detach(),
         "rule_positive_copy_margin_loss": rule_positive_copy_margin_loss.detach(),

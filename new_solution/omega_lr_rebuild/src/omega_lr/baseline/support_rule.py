@@ -25,11 +25,32 @@ def _insertion_base(features: dict, pos: int, fallback: str) -> str:
     return BASES[max(range(len(BASES)), key=lambda idx: base_counts[pos][idx])]
 
 
+def _confident(
+    features: dict,
+    pos: int,
+    support_value: float,
+    depth: float,
+    min_fraction: float,
+    min_margin: float,
+    max_entropy: float,
+) -> bool:
+    counts = list(features["support_base_counts"][pos])
+    sorted_counts = sorted(counts, reverse=True)
+    margin = (sorted_counts[0] if sorted_counts else 0) - (sorted_counts[1] if len(sorted_counts) > 1 else 0)
+    entropy = float(features.get("support_entropy", [0.0] * len(features["support_base_counts"]))[pos])
+    return support_value / max(depth, 1.0) >= min_fraction and margin >= min_margin and entropy <= max_entropy
+
+
 def predict(
     example: dict,
     agreement_threshold: float = 0.60,
     insertion_threshold: float = 0.50,
     deletion_threshold: float = 0.50,
+    use_confidence: bool = False,
+    confidence_min_fraction: float = 0.75,
+    confidence_min_margin: float = 1.0,
+    confidence_max_entropy: float = 0.95,
+    deletion_confidence_min_fraction: float = 0.90,
 ) -> dict:
     features = example["features"]
     prediction = []
@@ -42,17 +63,28 @@ def predict(
         insertion_count = float(features["support_ins_count"][pos])
         deletion_count = float(features["support_del_count"][pos])
 
-        if base != target_base and agreement >= agreement_threshold and _passes(base_count, depth, agreement_threshold):
+        sub_confident = (not use_confidence) or _confident(
+            features,
+            pos,
+            float(base_count),
+            depth,
+            confidence_min_fraction,
+            confidence_min_margin,
+            confidence_max_entropy,
+        )
+        if base != target_base and agreement >= agreement_threshold and _passes(base_count, depth, agreement_threshold) and sub_confident:
             labels.append(f"SUB_{base}")
             prediction.append(base)
             continue
-        if _passes(insertion_count, depth, insertion_threshold):
+        ins_confident = (not use_confidence) or insertion_count / max(depth, 1.0) >= confidence_min_fraction
+        if _passes(insertion_count, depth, insertion_threshold) and ins_confident:
             ins_base = _insertion_base(features, pos, target_base)
             labels.append(f"INS_{ins_base}")
             prediction.append(target_base)
             prediction.append(ins_base)
             continue
-        if _passes(deletion_count, depth, deletion_threshold):
+        del_confident = (not use_confidence) or deletion_count / max(depth, 1.0) >= deletion_confidence_min_fraction
+        if _passes(deletion_count, depth, deletion_threshold) and del_confident:
             labels.append("DEL")
             continue
         labels.append("COPY")

@@ -32,6 +32,11 @@ def main() -> None:
             agreement_threshold=config["baseline"].get("support_rule_agreement_threshold", 0.60),
             insertion_threshold=config["baseline"].get("support_rule_insertion_threshold", 0.50),
             deletion_threshold=config["baseline"].get("support_rule_deletion_threshold", 0.50),
+            use_confidence=config["baseline"].get("support_rule_use_confidence", False),
+            confidence_min_fraction=config["baseline"].get("support_rule_confidence_min_fraction", 0.75),
+            confidence_min_margin=config["baseline"].get("support_rule_confidence_min_margin", 1.0),
+            confidence_max_entropy=config["baseline"].get("support_rule_confidence_max_entropy", 0.95),
+            deletion_confidence_min_fraction=config["baseline"].get("support_rule_deletion_confidence_min_fraction", 0.90),
         ),
         "consensus": lambda example: consensus.predict(
             example,

@@ -1,31 +1,26 @@
-name: debug_synthetic_generalization
+name: debug_synthetic_noisy_small
 regression_targets:
-  notebook_21_full_hybrid:
-    usable_score_min: 0.9722
+  fast_noisy_safety:
+    run_name: full_hybrid
+    usable_score_min: 0.9505
     hard_edit_false_positive_rate_max: 0.0
     overcorrection_rate_max: 0.0
-  notebook_18_full_hybrid:
-    usable_score_min: 0.9722
-    hard_edit_false_positive_rate_max: 0.0
-    overcorrection_rate_max: 0.0
-  notebook_19_full_hybrid:
-    usable_score_min: 0.9722
-    hard_edit_false_positive_rate_max: 0.0
-    overcorrection_rate_max: 0.0
+    corrected_edits_min: 10
+    false_edits_max: 0
 dataset:
   kind: synthetic
-  synthetic_suite: harder
+  synthetic_suite: noisy_curated
   sample_id: DEBUG
-  output_dir: outputs/debug_synthetic_generalization/dataset
+  output_dir: outputs/debug_synthetic_noisy_small/dataset
   splits:
-    train: 68
-    val: 17
-    test: 17
+    train: 72
+    val: 24
+    test: 24
   max_window_length: 64
   overlap: 8
   max_support_reads: 6
   max_deletion_length: 3
-  synthetic_seed: 31
+  synthetic_seed: 47
   shared_examples_across_splits: false
 model:
   target_only:
@@ -40,22 +35,22 @@ model_debug:
   use_trust_gate: false
   use_delete_length_head: false
 train:
-  output_dir: outputs/debug_synthetic_generalization
-  epochs: 12
+  output_dir: outputs/debug_synthetic_noisy_small
+  epochs: 10
   batch_size: 4
   lr: 0.001
-  patience: 6
+  patience: 5
   hard_edit_oversample_factor: 4
   encourage_edits_schedule:
-    warmup_epochs: 4
+    warmup_epochs: 3
     early_false_positive_penalty_weight: 0.02
-    late_false_positive_penalty_weight: 0.35
+    late_false_positive_penalty_weight: 0.40
     early_copy_to_sub_penalty_weight: 0.00
-    late_copy_to_sub_penalty_weight: 0.60
+    late_copy_to_sub_penalty_weight: 0.70
     early_copy_to_del_penalty_weight: 0.00
     late_copy_to_del_penalty_weight: 0.90
     early_copy_to_ins_penalty_weight: 0.00
-    late_copy_to_ins_penalty_weight: 0.60
+    late_copy_to_ins_penalty_weight: 0.70
     early_positive_hard_edit_reward_weight: 1.00
     late_positive_hard_edit_reward_weight: 0.45
     early_gate_open_bias: 0.00
@@ -78,6 +73,12 @@ train:
   support_majority_loss_weight: 0.15
   support_sub_loss_weight: 0.10
   support_ins_loss_weight: 0.10
+  support_ins_base_loss_weight: 1.50
+  support_ins_base_weights:
+    A: 4.0
+    C: 1.0
+    G: 4.0
+    T: 1.0
   support_del_loss_weight: 0.10
   support_rule_type_loss_weight: 2.00
   rule_copy_margin: 1.50
@@ -94,26 +95,6 @@ train:
   no_ins_evidence_copy_to_ins_penalty_weight: 1.75
   no_ins_evidence_ins_margin: 1.50
   no_ins_evidence_ins_margin_weight: 1.75
-  ins_payload_base_weights:
-    A: 4.0
-    C: 1.0
-    G: 4.0
-    T: 1.0
-  sub_payload_base_weights:
-    A: 1.0
-    C: 1.0
-    G: 1.0
-    T: 2.0
-  sub_type_activation_base_weights:
-    A: 1.25
-    C: 1.0
-    G: 1.0
-    T: 2.5
-  ins_type_activation_base_weights:
-    A: 2.5
-    C: 1.0
-    G: 2.5
-    T: 1.0
   sub_payload_loss_weight: 1.50
   ins_payload_loss_weight: 5.00
   type_margin: 0.50
@@ -158,31 +139,58 @@ decode:
     T: 0.60
   hybrid_del_threshold: 1
   hybrid_force_del: true
-  hybrid_rule_force_min_support_fraction: 0.666
+  hybrid_rule_force_min_support_fraction: 0.75
   hybrid_rule_force_min_support_margin: 1.0
   hybrid_rule_force_max_entropy: 0.95
   hybrid_rule_force_min_depth: 3
+  hybrid_del_force_min_support_fraction: 0.90
+  hybrid_del_force_min_support_margin: 2.0
+  hybrid_del_force_max_entropy: 0.60
+  hybrid_ins_force_min_support_fraction: 0.666
+  hybrid_ins_force_min_support_margin: 0.0
+  hybrid_ins_force_max_entropy: 1.00
+  hybrid_ins_support_payload_rescue: true
+  hybrid_ins_support_payload_min_fraction: 0.666
+  hybrid_ins_support_payload_min_count: 2
+  hybrid_ins_support_payload_min_depth: 3
+  hybrid_ins_support_payload_max_entropy: 1.00
+  hybrid_ins_support_payload_allow_neighbor: false
+  hybrid_neighbor_min_support_fraction: 0.90
+  hybrid_neighbor_max_entropy: 0.50
+  hybrid_homopolymer_min_support_fraction: 0.90
+  hybrid_adjacent_edit_suppression: true
+  hybrid_adjacent_score_tie_epsilon: 0.05
   hybrid_negative_veto: true
-  hybrid_negative_veto_min_type_prob: 0.80
-  hybrid_negative_veto_min_payload_prob: 0.98
-  hybrid_negative_veto_min_agreement: 0.95
-  hybrid_negative_veto_min_support_fraction: 0.80
-  hybrid_sub_a_copy_safety: true
-  hybrid_sub_a_copy_veto_min_payload_prob: 0.995
-  hybrid_sub_a_copy_veto_min_agreement: 0.98
-  hybrid_sub_a_copy_veto_min_support_fraction: 0.90
+  hybrid_negative_veto_min_type_prob: 0.95
+  hybrid_negative_veto_min_payload_prob: 0.995
+  hybrid_negative_veto_min_agreement: 0.98
+  hybrid_negative_veto_min_support_fraction: 0.95
+  hybrid_require_rule_agreement_for_neural_edits: true
+  hybrid_rule_agree_min_type_prob: 0.75
+  hybrid_rule_agree_min_payload_prob: 0.85
+  hybrid_rule_agree_min_support_fraction: 0.60
+  hybrid_rule_agree_min_agreement: 0.60
   hybrid_neural_rescue_enabled: true
   hybrid_neural_rescue_min_type_prob: 0.00
   hybrid_neural_rescue_min_del_type_prob: 0.50
   hybrid_neural_rescue_min_payload_prob: 0.95
   hybrid_neural_rescue_min_support_fraction: 0.666
   hybrid_neural_rescue_min_agreement: 0.60
+  hybrid_sub_a_copy_safety: true
+  hybrid_sub_a_copy_veto_min_payload_prob: 0.995
+  hybrid_sub_a_copy_veto_min_agreement: 0.98
+  hybrid_sub_a_copy_veto_min_support_fraction: 0.90
   support_rule_agreement_threshold: 0.60
   support_rule_insertion_threshold: 0.50
-  support_rule_deletion_threshold: 0.50
+  support_rule_deletion_threshold: 0.75
+  support_rule_use_confidence: true
+  support_rule_confidence_min_fraction: 0.75
+  support_rule_confidence_min_margin: 1.0
+  support_rule_confidence_max_entropy: 0.95
+  support_rule_deletion_confidence_min_fraction: 0.90
 baseline:
   consensus_agreement_threshold: 0.75
   deletion_threshold: 0.70
   support_rule_agreement_threshold: 0.60
   support_rule_insertion_threshold: 0.50
-  support_rule_deletion_threshold: 0.50
+  support_rule_deletion_threshold: 0.75

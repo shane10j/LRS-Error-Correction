@@ -11,6 +11,7 @@ from pathlib import Path
 
 from omega_lr.utils import print_config, read_config, save_json
 from omega_lr.eval.summaries import benchmark_record
+from omega_lr.constants import ID_TO_EDIT
 
 
 def load_summary_if_exists(path: Path):
@@ -29,6 +30,45 @@ def load_benchmark_record(path: Path, run_name: str):
     if all(key in record for key in ["identity", "edit_distance", "overcorrection_rate", "hard_edit_false_positive_rate"]):
         return record
     return benchmark_record(run_name, record.get("test_summary", {}))
+
+
+def load_jsonl(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    import json
+
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def correction_counts(config: dict, output_root: Path, run_name: str) -> dict:
+    """Count corrected, missed, and false hard edits for regression gates."""
+    if run_name in {"full_hybrid", "full"}:
+        predictions_path = output_root / "full/test_predictions.jsonl"
+    elif run_name == "target_only":
+        predictions_path = output_root / "target_only/test_predictions.jsonl"
+    else:
+        predictions_path = output_root / f"baselines/{run_name}/test_predictions.jsonl"
+    examples = load_jsonl(Path(config["dataset"]["output_dir"]) / "test.jsonl")
+    predictions = load_jsonl(predictions_path)
+    corrected_edits = 0
+    missed_edits = 0
+    false_edits = 0
+    for example, prediction in zip(examples, predictions):
+        gold_labels = [ID_TO_EDIT[int(label)] for label in example["edit_labels"]]
+        predicted_labels = prediction.get("predicted_labels", [])
+        for pos, gold in enumerate(gold_labels):
+            pred = predicted_labels[pos] if pos < len(predicted_labels) else "COPY"
+            if gold != "COPY" and pred == gold:
+                corrected_edits += 1
+            elif gold != "COPY" and pred != gold:
+                missed_edits += 1
+            elif gold == "COPY" and pred != "COPY":
+                false_edits += 1
+    return {
+        "corrected_edits": corrected_edits,
+        "missed_edits": missed_edits,
+        "false_edits": false_edits,
+    }
 
 
 def ensure_required_runs(config_path: str, output_root: Path) -> None:
@@ -52,7 +92,7 @@ def ensure_required_runs(config_path: str, output_root: Path) -> None:
             subprocess.run([sys.executable, "scripts/train_model.py", "--config", config_path, "--run-name", run_name], cwd=project_root, check=True, env=env)
 
 
-def check_regression_targets(config: dict, summary: dict) -> dict:
+def check_regression_targets(config: dict, summary: dict, output_root: Path) -> dict:
     """Fail loudly when named precision-first baselines regress."""
     runs = summary.get("runs", {})
     checks = []
@@ -60,8 +100,29 @@ def check_regression_targets(config: dict, summary: dict) -> dict:
     for target_name, target in config.get("regression_targets", {}).items():
         run_name = target.get("run_name", "full_hybrid")
         record = runs.get(run_name) or {}
+        count_record = None
         for key, expected in target.items():
             if key == "run_name":
+                continue
+            if key in {"corrected_edits_min", "missed_edits_max", "false_edits_max"}:
+                if count_record is None:
+                    count_record = correction_counts(config, output_root, run_name)
+                metric = key.rsplit("_", 1)[0]
+                observed = count_record.get(metric, 0)
+                comparator = ">=" if key.endswith("_min") else "<="
+                passed = observed >= expected if key.endswith("_min") else observed <= expected
+                row = {
+                    "target": target_name,
+                    "run_name": run_name,
+                    "metric": metric,
+                    "observed": observed,
+                    "comparator": comparator,
+                    "expected": expected,
+                    "passed": passed,
+                }
+                checks.append(row)
+                if not passed:
+                    failures.append(row)
                 continue
             if key.endswith("_min"):
                 metric = key[: -len("_min")]
@@ -81,6 +142,27 @@ def check_regression_targets(config: dict, summary: dict) -> dict:
                 "metric": metric,
                 "observed": observed,
                 "comparator": comparator,
+                "expected": expected,
+                "passed": passed,
+            }
+            checks.append(row)
+            if not passed:
+                failures.append(row)
+        for key, other_run_name in target.items():
+            if not key.endswith("_gt_run"):
+                continue
+            metric = key[: -len("_gt_run")]
+            observed = record.get(metric, 0.0)
+            other_record = runs.get(other_run_name) or {}
+            expected = other_record.get(metric, 0.0)
+            passed = observed > expected
+            row = {
+                "target": target_name,
+                "run_name": run_name,
+                "metric": metric,
+                "observed": observed,
+                "comparator": ">",
+                "expected_run": other_run_name,
                 "expected": expected,
                 "passed": passed,
             }
@@ -115,7 +197,7 @@ def main() -> None:
             "full": load_benchmark_record(output_root / "full/benchmark_summary.json", "full_hybrid"),
         },
     }
-    regression = check_regression_targets(config, summary)
+    regression = check_regression_targets(config, summary, output_root)
     summary["regression_targets"] = regression
     save_json(summary, output_root / "benchmark_summary.json")
     save_json(regression, output_root / "regression_targets.json")
