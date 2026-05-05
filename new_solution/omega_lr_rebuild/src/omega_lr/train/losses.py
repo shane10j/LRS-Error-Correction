@@ -179,6 +179,21 @@ def compute_losses(batch: dict, outputs: dict, config: dict, device: torch.devic
         support_ins_base_loss = weighted_masked_mean(support_ins_base_losses, support_ins_base_weights)
     else:
         support_ins_base_loss = torch.tensor(0.0, device=device)
+    support_sub_base_positions = (support_sub_labels > 0.5) & (mask > 0.5)
+    if support_sub_base_positions.any():
+        support_sub_base_losses = F.cross_entropy(
+            outputs["sub_base_logits"][support_sub_base_positions],
+            support_majority_labels[support_sub_base_positions].clamp(min=0, max=3),
+            reduction="none",
+        )
+        support_sub_base_weights = base_position_weights(
+            support_majority_labels[support_sub_base_positions],
+            config["train"].get("support_sub_base_weights", config["train"].get("sub_payload_base_weights", {})),
+            device,
+        )
+        support_sub_base_loss = weighted_masked_mean(support_sub_base_losses, support_sub_base_weights)
+    else:
+        support_sub_base_loss = torch.tensor(0.0, device=device)
     support_del_loss = (
         masked_bce(outputs["support_suggests_del_logits"], support_del_labels)
         if "support_suggests_del_logits" in outputs
@@ -402,6 +417,7 @@ def compute_losses(batch: dict, outputs: dict, config: dict, device: torch.devic
         + delete_length_loss
         + support_loss_scale * schedule.get("support_majority_loss_weight", config["train"].get("support_majority_loss_weight", 0.0)) * support_majority_loss
         + support_loss_scale * schedule.get("support_sub_loss_weight", config["train"].get("support_sub_loss_weight", 0.0)) * support_sub_loss
+        + support_loss_scale * schedule.get("support_sub_base_loss_weight", config["train"].get("support_sub_base_loss_weight", 0.0)) * support_sub_base_loss
         + support_loss_scale * schedule.get("support_ins_loss_weight", config["train"].get("support_ins_loss_weight", 0.0)) * support_ins_loss
         + support_loss_scale * schedule.get("support_ins_base_loss_weight", config["train"].get("support_ins_base_loss_weight", 0.0)) * support_ins_base_loss
         + support_loss_scale * schedule.get("support_del_loss_weight", config["train"].get("support_del_loss_weight", 0.0)) * support_del_loss
@@ -438,6 +454,7 @@ def compute_losses(batch: dict, outputs: dict, config: dict, device: torch.devic
         "delete_length_loss": delete_length_loss.detach(),
         "support_majority_loss": support_majority_loss.detach(),
         "support_sub_loss": support_sub_loss.detach(),
+        "support_sub_base_loss": support_sub_base_loss.detach(),
         "support_ins_loss": support_ins_loss.detach(),
         "support_ins_base_loss": support_ins_base_loss.detach(),
         "support_del_loss": support_del_loss.detach(),

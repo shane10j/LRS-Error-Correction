@@ -1,0 +1,77 @@
+name: local_real_mac
+seed: 47
+
+paths:
+  output_dir: outputs/local_real_mac
+
+data:
+  kind: real_bam
+  bam: /path/to/aligned_reads.bam
+  reference_fasta: /path/to/reference.fa
+  contig: chr20
+  start: 1000000
+  end: 1100000
+  num_train: 500
+  num_val: 100
+  num_test: 100
+  window_length: 512
+  max_support_reads: 8
+  min_read_length: 1000
+  truth_source: reference
+
+model:
+  d_model: 128
+  num_layers: 2
+  num_heads: 4
+  dropout: 0.08
+  max_len: 1024
+  use_support: true
+  use_rule_features: true
+
+train:
+  epochs: 4
+  batch_size: 4
+  lr: 0.0005
+  weight_decay: 0.00001
+  hard_edit_weight: 3.0
+  false_edit_penalty: 1.0
+  support_rule_distill_weight: 0.6
+  margin_weight: 0.5
+  margin: 0.75
+  ins_payload_weight: 1.5
+  sub_payload_weight: 1.5
+  device: auto
+
+decode:
+  mode: hybrid
+  support_rule_agreement_threshold: 0.72
+  support_rule_insertion_threshold: 0.75
+  support_rule_deletion_threshold: 0.85
+  rule_force_min_fraction:
+    SUB: 0.85
+    INS: 0.75
+    DEL: 0.90
+  rule_force_max_entropy:
+    SUB: 0.85
+    INS: 0.95
+    DEL: 0.65
+  neural_rescue_min_type_prob:
+    SUB: 0.99
+    INS: 0.99
+    DEL: 0.997
+  neural_rescue_min_payload_prob: 0.97
+  rule_negative_veto: true
+  neighbor_abstention: true
+  neighbor_radius: 1
+  neighbor_min_fraction: 0.92
+  homopolymer_del_min_fraction: 0.97
+  use_support_payload_for_insertions: true
+
+external_baselines:
+  # Add SOTA outputs here after running them outside this lightweight repo.
+  # - name: dorado_or_medaka
+  #   path: /path/to/corrected.fastq
+  #   format: fastq
+  # - name: herro_or_dechat
+  #   path: /path/to/corrected.fasta
+  #   format: fasta

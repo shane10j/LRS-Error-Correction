@@ -29,7 +29,9 @@ from omega_lr.eval.inspect import (
     print_missed_evidence_reports,
     print_support_rule_audit,
     print_support_rule_calibration_report,
+    print_substitution_payload_reports,
     print_vetoed_true_edit_reports,
+    substitution_payload_diagnostics,
     support_rule_calibration_report,
     support_rule_positive_audit,
     vetoed_true_edit_diagnostics,
@@ -53,6 +55,7 @@ def main() -> None:
             "hybrid_miss",
             "false_sub",
             "false_hard",
+            "sub_payload",
             "ins_payload",
             "support_rule_audit",
             "rule_calibration",
@@ -161,6 +164,16 @@ def main() -> None:
         )
         print_insertion_payload_reports(reports)
         save_json(reports, output_dir / "ins_payload_probe.json")
+        return
+
+    if args.mode == "sub_payload":
+        reports = substitution_payload_diagnostics(
+            config=config,
+            checkpoint_path=checkpoint,
+            split=args.split,
+        )
+        print_substitution_payload_reports(reports)
+        save_json(reports, output_dir / "sub_payload_probe.json")
         return
 
     if args.mode == "support_rule_audit":

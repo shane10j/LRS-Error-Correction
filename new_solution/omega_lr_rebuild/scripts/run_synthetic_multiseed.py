@@ -288,6 +288,18 @@ def main() -> None:
                     "--checkpoint",
                     str(checkpoint),
                     "--mode",
+                    "sub_payload",
+                    "--run-output-dir",
+                    str(full_dir),
+                )
+                run(
+                    project_root,
+                    "scripts/debug_probe.py",
+                    "--config",
+                    str(config_path),
+                    "--checkpoint",
+                    str(checkpoint),
+                    "--mode",
                     "vetoed_true",
                     "--run-output-dir",
                     str(full_dir),

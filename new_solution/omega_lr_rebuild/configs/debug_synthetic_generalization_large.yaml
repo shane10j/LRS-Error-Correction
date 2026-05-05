@@ -70,6 +70,12 @@ train:
   delete_candidate_aux_weight: 0.05
   support_majority_loss_weight: 0.15
   support_sub_loss_weight: 0.10
+  support_sub_base_loss_weight: 2.50
+  support_sub_base_weights:
+    A: 1.0
+    C: 1.0
+    G: 1.0
+    T: 6.0
   support_ins_loss_weight: 0.10
   support_ins_base_loss_weight: 1.50
   support_ins_base_weights:
@@ -102,7 +108,7 @@ train:
     A: 1.0
     C: 1.0
     G: 1.0
-    T: 2.0
+    T: 3.0
   sub_type_activation_base_weights:
     A: 1.25
     C: 1.0
@@ -113,7 +119,7 @@ train:
     C: 1.0
     G: 2.5
     T: 1.0
-  sub_payload_loss_weight: 1.50
+  sub_payload_loss_weight: 2.00
   ins_payload_loss_weight: 5.00
   type_margin: 0.50
   type_margin_weight: 1.00
@@ -147,6 +153,14 @@ decode:
     C: 0.85
     G: 0.85
     T: 0.80
+  hybrid_sub_t_calibrated_rescue: true
+  hybrid_sub_t_rescue_min_payload: 0.60
+  hybrid_sub_t_rescue_min_type_prob: 0.25
+  hybrid_sub_t_rescue_required_support_count: 2
+  hybrid_sub_t_rescue_required_depth: 3
+  hybrid_sub_t_rescue_max_entropy: 0.95
+  hybrid_sub_t_rescue_max_ins_count: 0
+  hybrid_sub_t_rescue_max_del_count: 0
   hybrid_sub_min_type_prob: 0.05
   hybrid_sub_min_copy_margin: -0.75
   hybrid_ins_payload_threshold: 0.60
@@ -164,6 +178,29 @@ decode:
   hybrid_del_force_min_support_fraction: 0.90
   hybrid_del_force_min_support_margin: 2.0
   hybrid_del_force_max_entropy: 0.60
+  hybrid_neighbor_abstention: true
+  hybrid_neighbor_abstain_min_support_fraction: 0.90
+  hybrid_neighbor_abstain_min_support_margin: 4.0
+  hybrid_neighbor_abstain_max_entropy: 0.30
+  hybrid_neighbor_del_min_support_fraction: 0.95
+  hybrid_neighbor_del_min_support_margin: 4.0
+  hybrid_neighbor_del_max_entropy: 0.20
+  hybrid_neighbor_sub_min_support_fraction: 0.90
+  hybrid_neighbor_sub_min_support_margin: 4.0
+  hybrid_neighbor_sub_max_entropy: 0.30
+  hybrid_neighbor_ins_min_support_fraction: 0.85
+  hybrid_neighbor_ins_min_support_margin: 3.0
+  hybrid_neighbor_ins_max_entropy: 0.50
+  hybrid_neighbor_homopolymer_del_min_support_fraction: 0.98
+  hybrid_disable_neural_rescue_near_neighbors: true
+  hybrid_neighbor_neural_rescue_min_support_fraction: 0.90
+  hybrid_neighbor_neural_rescue_min_support_margin: 4.0
+  hybrid_neighbor_neural_rescue_max_entropy: 0.30
+  hybrid_local_window_rerank: true
+  hybrid_local_window_edit_penalty: 0.20
+  hybrid_local_window_del_edit_penalty: 0.40
+  hybrid_local_window_min_keep_score: 0.95
+  hybrid_local_window_del_min_keep_score: 1.10
   hybrid_ins_force_min_support_fraction: 0.666
   hybrid_ins_force_min_support_margin: 0.0
   hybrid_ins_force_max_entropy: 1.00
@@ -173,11 +210,14 @@ decode:
   hybrid_ins_support_payload_min_depth: 3
   hybrid_ins_support_payload_max_entropy: 1.00
   hybrid_ins_support_payload_allow_neighbor: false
+  hybrid_ins_neighbor_neural_rescue: true
   hybrid_neighbor_min_support_fraction: 0.90
   hybrid_neighbor_max_entropy: 0.50
   hybrid_homopolymer_min_support_fraction: 0.90
   hybrid_adjacent_edit_suppression: true
   hybrid_adjacent_score_tie_epsilon: 0.05
+  hybrid_adjacent_keep_strong_rule_agreeing_edits: true
+  hybrid_adjacent_keep_min_label_score: 0.95
   hybrid_negative_veto: true
   hybrid_negative_veto_min_type_prob: 0.95
   hybrid_negative_veto_min_payload_prob: 0.995

@@ -91,7 +91,7 @@ The workspace currently includes the HG002 chr20 BAM subset plus benchmark VCF/B
 Each run directory saves:
 
 - `config_snapshot.yaml`
-- `manifest.json`
+- `manifest.json` 
 - `history.json`
 - `test_summary.json`
 - `benchmark_summary.json`

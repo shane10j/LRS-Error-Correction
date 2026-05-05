@@ -158,6 +158,22 @@ def _ins_payload_diagnostic(gold_label: str, ins_probs_row: torch.Tensor) -> dic
     }
 
 
+def _sub_payload_diagnostic(gold_label: str, sub_probs_row: torch.Tensor) -> dict | None:
+    if not gold_label.startswith("SUB_"):
+        return None
+    gold_base = gold_label.split("_", 1)[1]
+    gold_idx = BASES.index(gold_base)
+    gold_prob = float(sub_probs_row[gold_idx].item())
+    rank = 1 + sum(float(value.item()) > gold_prob for value in sub_probs_row)
+    return {
+        "gold_sub_base": gold_base,
+        "gold_base_rank": int(rank),
+        "gold_base_prob": round(gold_prob, 4),
+        "payload_ce": round(-log(max(gold_prob, 1e-8)), 4),
+        "sub_base_probs": _named_probs(BASES, sub_probs_row),
+    }
+
+
 def _edit_family(label: str) -> str:
     if label.startswith("SUB_"):
         return "SUB"
@@ -176,6 +192,36 @@ def _payload_confidence(label: str, sub_probs_row: torch.Tensor, ins_probs_row: 
     if label == "DEL":
         return 1.0
     return 0.0
+
+
+def _false_edit_mechanism(predicted: str, support_rule_label: str | None, neural_label: str | None, trace: dict, example: dict, pos: int) -> list[str]:
+    """Coarse mechanism tags for large noisy false-positive triage."""
+    family = _edit_family(predicted)
+    confidence = trace.get("rule_confidence", {})
+    tags = [f"false_{family.lower()}"]
+    if support_rule_label and support_rule_label != "COPY":
+        tags.append("support_rule_false_positive")
+    if neural_label == predicted:
+        tags.append("neural_hallucination_not_vetoed")
+    if trace.get("forced_by_rule", False):
+        tags.append("hybrid_forced_false_edit")
+    if trace.get("rescued_by_neural", False):
+        tags.append("neural_rescue_false_edit")
+    if trace.get("rescued_by_support_payload", False):
+        tags.append("support_payload_rescue_false_edit")
+    if trace.get("rescued_by_sub_t_calibration", False):
+        tags.append("sub_t_calibration_false_edit")
+    if int(confidence.get("neighbor_edit_proximity", 0)) > 0:
+        tags.append("neighbor_induced")
+    if int(confidence.get("homopolymer_run_length", 1)) >= 4 and family == "DEL":
+        tags.append("homopolymer_false_deletion")
+    if pos == 0 or pos == len(example["target_seq"]) - 1:
+        tags.append("boundary_ambiguous")
+    if float(confidence.get("support_margin", 0.0)) <= 1.0:
+        tags.append("low_support_margin")
+    if float(confidence.get("local_entropy", 0.0)) >= 0.9:
+        tags.append("high_entropy")
+    return tags
 
 
 def _nearest_other_hard_distance(gold_labels: list[str], pos: int) -> int | None:
@@ -250,6 +296,7 @@ def _support_rule_row(
         "type_probs": _named_probs(EDIT_TYPE_LABELS, type_probs_row),
         "sub_base_probs": _named_probs(BASES, sub_probs_row),
         "ins_base_probs": _named_probs(BASES, ins_probs_row),
+        "decoder_trace": trace,
     }
 
 
@@ -598,6 +645,58 @@ def insertion_payload_diagnostics(
     return reports
 
 
+def substitution_payload_diagnostics(
+    config: dict,
+    checkpoint_path: str | Path,
+    split: str = "test",
+) -> list[dict]:
+    model, device = load_model_for_inspection(config, checkpoint_path)
+    dataset_dir = resolve_path(config["dataset"]["output_dir"])
+    _, loader = make_loader(dataset_dir / f"{split}.jsonl", batch_size=1, shuffle=False)
+    reports = []
+    with torch.no_grad():
+        for batch in loader:
+            example = batch["raw_examples"][0]
+            outputs = model(batch["target_tokens"].to(device), batch["pileup_features"].to(device), batch["rule_features"].to(device))
+            length = len(example["target_seq"])
+            sliced = {
+                "type_logits": outputs["type_logits"][0, :length].detach().cpu(),
+                "sub_base_logits": outputs["sub_base_logits"][0, :length].detach().cpu(),
+                "ins_base_logits": outputs["ins_base_logits"][0, :length].detach().cpu(),
+                "edit_logits": outputs["edit_logits"][0, :length].detach().cpu(),
+                "delete_candidate_logits": outputs["delete_candidate_logits"][0, :length].detach().cpu(),
+                "delete_length_logits": outputs["delete_length_logits"][0, :length].detach().cpu(),
+                "trust": outputs["trust"][0, :length].detach().cpu(),
+            }
+            decoded = decode_example(example["target_seq"], example, sliced, config["decode"])
+            type_probs = torch.softmax(sliced["type_logits"], dim=-1)
+            sub_probs = torch.softmax(sliced["sub_base_logits"], dim=-1)
+            gold_labels = [_gold_label_name(label) for label in example["edit_labels"]]
+            for pos, gold_label in enumerate(gold_labels):
+                if not gold_label.startswith("SUB_"):
+                    continue
+                predicted = decoded["predicted_labels"][pos] if pos < len(decoded["predicted_labels"]) else None
+                trace = next((item for item in decoded["trace"] if item["pos"] == pos), {})
+                support_evidence = _support_evidence(example, pos)
+                support_majority = support_evidence["majority_base"]
+                reports.append(
+                    {
+                        "example_id": example["example_id"],
+                        "pos": pos,
+                        "gold_label": gold_label,
+                        "decoded_label": predicted,
+                        "is_correct": predicted == gold_label,
+                        "support_majority_matches_gold": support_majority == gold_label[-1],
+                        "support_evidence": support_evidence,
+                        "type_probs": _named_probs(EDIT_TYPE_LABELS, type_probs[pos]),
+                        "sub_payload_diagnostic": _sub_payload_diagnostic(gold_label, sub_probs[pos]),
+                        "forced_by_rule": bool(trace.get("forced_by_rule", False)),
+                        "veto_reasons": trace.get("veto_reasons", []),
+                    }
+                )
+    return reports
+
+
 def support_rule_positive_audit(
     config: dict,
     checkpoint_path: str | Path,
@@ -871,7 +970,7 @@ def calibration_allowed_missed_edits(
             "gold_label": row["gold_label"],
             "hybrid_label": row["hybrid_label"],
             "neural_only_label": row["neural_only_label"],
-            "argmax_label": row["argmax_label"],
+            "argmax_label": row.get("argmax_label"),
             "allow_edit_probability": row["allow_edit_probability"],
             "veto_reasons": row["veto_reasons"],
             "support_fraction": row["support_fraction"],
@@ -886,7 +985,7 @@ def calibration_allowed_missed_edits(
             "type_probs": row["type_probs"],
             "sub_base_probs": row["sub_base_probs"],
             "ins_base_probs": row["ins_base_probs"],
-            "decoder_trace": row["decoder_trace"],
+            "decoder_trace": row.get("decoder_trace", {}),
         }
         for row in missed
     ]
@@ -1032,19 +1131,53 @@ def false_hard_edit_diagnostics(
                     likely_source = "neural_prediction_not_vetoed"
                 else:
                     likely_source = "decode_alignment_or_trace_mismatch"
+                support_evidence = _support_evidence(example, pos)
+                confidence = trace.get("rule_confidence", {})
+                predicted_family = _edit_family(predicted)
+                predicted_type_prob = (
+                    float(type_probs[pos, EDIT_TYPE_LABELS.index(predicted_family)].item())
+                    if predicted_family != "COPY"
+                    else 0.0
+                )
+                payload_confidence = _payload_confidence(predicted, sub_probs[pos], ins_probs[pos])
+                neural_label = neural_decoded["predicted_labels"][pos] if pos < len(neural_decoded["predicted_labels"]) else None
                 reports.append(
                     {
                         "example_id": example["example_id"],
                         "pos": pos,
+                        "position": pos,
                         "gold_label": gold_label,
                         "predicted_label": predicted,
+                        "edit_type": predicted_family,
                         "support_rule_label": support_rule_label,
-                        "neural_only_label": neural_decoded["predicted_labels"][pos] if pos < len(neural_decoded["predicted_labels"]) else None,
+                        "neural_only_label": neural_label,
+                        "target_base": support_evidence["target_base"],
+                        "truth_base": support_evidence["truth_base"],
+                        "support_base_counts": support_evidence["support_base_counts"],
+                        "support_insertion_counts": support_evidence["support_ins_base_counts"],
+                        "support_deletion_count": support_evidence["support_del_count"],
+                        "support_insertion_count": support_evidence["support_ins_count"],
+                        "support_depth": round(float(confidence.get("support_depth", 0.0)), 4),
+                        "support_fraction": round(float(confidence.get("support_fraction", 0.0)), 4),
+                        "support_margin": round(float(confidence.get("support_margin", 0.0)), 4),
+                        "entropy": round(float(confidence.get("local_entropy", 0.0)), 4),
+                        "homopolymer_flag": int(confidence.get("homopolymer_run_length", 1)) >= 4,
+                        "homopolymer_run_length": int(confidence.get("homopolymer_run_length", 1)),
+                        "neighbor_edit_distance": _nearest_other_hard_distance(gold_labels, pos),
+                        "neighbor_edit_proximity": int(confidence.get("neighbor_edit_proximity", 0)),
+                        "boundary_flag": pos == 0 or pos == len(example["target_seq"]) - 1,
+                        "predicted_type_probability": round(predicted_type_prob, 4),
+                        "predicted_payload_probability": round(payload_confidence, 4),
                         "forced_by_rule": forced_by_rule,
+                        "rescued_by_neural": bool(trace.get("rescued_by_neural", False)),
+                        "rescued_by_support_payload": bool(trace.get("rescued_by_support_payload", False)),
+                        "rescued_by_sub_t_calibration": bool(trace.get("rescued_by_sub_t_calibration", False)),
                         "veto_status": trace.get("veto_reasons", []),
+                        "veto_or_rescue_reason": trace.get("veto_reasons", []),
                         "candidate_label": trace.get("candidate_label"),
                         "likely_source": likely_source,
-                        "support_evidence": _support_evidence(example, pos),
+                        "mechanism_tags": _false_edit_mechanism(predicted, support_rule_label, neural_label, trace, example, pos),
+                        "support_evidence": support_evidence,
                         "type_probs": _named_probs(EDIT_TYPE_LABELS, type_probs[pos]),
                         "sub_base_probs": _named_probs(BASES, sub_probs[pos]),
                         "ins_base_probs": _named_probs(BASES, ins_probs[pos]),
@@ -1227,6 +1360,30 @@ def print_insertion_payload_reports(reports: list[dict]) -> None:
         print("  support_evidence       :", report["support_evidence"])
         print("  type_probs             :", report["type_probs"])
         print("  ins_payload_diagnostic :", report["ins_payload_diagnostic"])
+        print("  veto_reasons           :", report["veto_reasons"])
+
+
+def print_substitution_payload_reports(reports: list[dict]) -> None:
+    print(f"substitution_case_count={len(reports)}")
+    by_base: dict[str, dict[str, int]] = {}
+    for report in reports:
+        base = report["gold_label"][-1]
+        bucket = by_base.setdefault(base, {"total": 0, "correct": 0, "support_majority_matches_gold": 0})
+        bucket["total"] += 1
+        bucket["correct"] += int(report["is_correct"])
+        bucket["support_majority_matches_gold"] += int(report["support_majority_matches_gold"])
+    print("substitution_by_base:", by_base)
+    for report in reports:
+        print("=" * 100)
+        print(
+            f"example_id={report['example_id']} pos={report['pos']} "
+            f"gold={report['gold_label']} decoded={report['decoded_label']} "
+            f"correct={report['is_correct']} forced_by_rule={report['forced_by_rule']} "
+            f"support_majority_matches_gold={report['support_majority_matches_gold']}"
+        )
+        print("  support_evidence       :", report["support_evidence"])
+        print("  type_probs             :", report["type_probs"])
+        print("  sub_payload_diagnostic :", report["sub_payload_diagnostic"])
         print("  veto_reasons           :", report["veto_reasons"])
 
 

@@ -2,10 +2,10 @@ name: debug_synthetic_noisy_small
 regression_targets:
   fast_noisy_safety:
     run_name: full_hybrid
-    usable_score_min: 0.9505
+    usable_score_min: 0.9554
     hard_edit_false_positive_rate_max: 0.0
     overcorrection_rate_max: 0.0
-    corrected_edits_min: 10
+    corrected_edits_min: 12
     false_edits_max: 0
 dataset:
   kind: synthetic
@@ -72,6 +72,12 @@ train:
   delete_candidate_aux_weight: 0.05
   support_majority_loss_weight: 0.15
   support_sub_loss_weight: 0.10
+  support_sub_base_loss_weight: 2.50
+  support_sub_base_weights:
+    A: 1.0
+    C: 1.0
+    G: 1.0
+    T: 6.0
   support_ins_loss_weight: 0.10
   support_ins_base_loss_weight: 1.50
   support_ins_base_weights:
@@ -95,7 +101,12 @@ train:
   no_ins_evidence_copy_to_ins_penalty_weight: 1.75
   no_ins_evidence_ins_margin: 1.50
   no_ins_evidence_ins_margin_weight: 1.75
-  sub_payload_loss_weight: 1.50
+  sub_payload_base_weights:
+    A: 1.0
+    C: 1.0
+    G: 1.0
+    T: 3.0
+  sub_payload_loss_weight: 2.00
   ins_payload_loss_weight: 5.00
   type_margin: 0.50
   type_margin_weight: 1.00
@@ -129,6 +140,14 @@ decode:
     C: 0.85
     G: 0.85
     T: 0.80
+  hybrid_sub_t_calibrated_rescue: true
+  hybrid_sub_t_rescue_min_payload: 0.60
+  hybrid_sub_t_rescue_min_type_prob: 0.25
+  hybrid_sub_t_rescue_required_support_count: 2
+  hybrid_sub_t_rescue_required_depth: 3
+  hybrid_sub_t_rescue_max_entropy: 0.95
+  hybrid_sub_t_rescue_max_ins_count: 0
+  hybrid_sub_t_rescue_max_del_count: 0
   hybrid_sub_min_type_prob: 0.05
   hybrid_sub_min_copy_margin: -0.75
   hybrid_ins_payload_threshold: 0.60
@@ -155,11 +174,14 @@ decode:
   hybrid_ins_support_payload_min_depth: 3
   hybrid_ins_support_payload_max_entropy: 1.00
   hybrid_ins_support_payload_allow_neighbor: false
+  hybrid_ins_neighbor_neural_rescue: true
   hybrid_neighbor_min_support_fraction: 0.90
   hybrid_neighbor_max_entropy: 0.50
   hybrid_homopolymer_min_support_fraction: 0.90
   hybrid_adjacent_edit_suppression: true
   hybrid_adjacent_score_tie_epsilon: 0.05
+  hybrid_adjacent_keep_strong_rule_agreeing_edits: true
+  hybrid_adjacent_keep_min_label_score: 0.95
   hybrid_negative_veto: true
   hybrid_negative_veto_min_type_prob: 0.95
   hybrid_negative_veto_min_payload_prob: 0.995
