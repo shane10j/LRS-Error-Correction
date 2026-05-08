@@ -86,7 +86,7 @@ def evaluate_model(config: dict, model: torch.nn.Module, dataset: SeqEditDataset
     return summarize_predictions(decoded)
 
 
-def evaluate_checkpoint(config: dict, run_name: str, split: str = "test", mode: str = "hybrid") -> dict:
+def evaluate_checkpoint(config: dict, run_name: str, split: str = "test", mode: str = "hybrid", output_tag: str | None = None) -> dict:
     dataset_dir = Path(config["paths"]["dataset_dir"])
     run_dir = Path(config["paths"]["runs_dir"]) / run_name
     dataset = SeqEditDataset(str(dataset_dir / f"{split}.jsonl"))
@@ -98,7 +98,8 @@ def evaluate_checkpoint(config: dict, run_name: str, split: str = "test", mode: 
     model.to(device)
     eval_mode = "neural" if run_name == "target_only" else mode
     summary = evaluate_model(config, model, dataset, device, mode=eval_mode)
-    write_json(run_dir / f"{split}_{eval_mode}_summary.json", summary)
+    tag = output_tag or eval_mode
+    write_json(run_dir / f"{split}_{tag}_summary.json", summary)
     # Save decoded rows for qualitative notebook inspection.
     loader = DataLoader(dataset, batch_size=int(config["train"]["batch_size"]), shuffle=False, collate_fn=collate_seqedit)
     decoded = []
@@ -111,5 +112,5 @@ def evaluate_checkpoint(config: dict, run_name: str, split: str = "test", mode: 
             for idx, record in enumerate(raw_records):
                 pred = decode_record(outputs, idx, record, config, mode=eval_mode)
                 decoded.append({**record, **pred})
-    write_jsonl(run_dir / f"{split}_{eval_mode}_predictions.jsonl", decoded)
+    write_jsonl(run_dir / f"{split}_{tag}_predictions.jsonl", decoded)
     return summary

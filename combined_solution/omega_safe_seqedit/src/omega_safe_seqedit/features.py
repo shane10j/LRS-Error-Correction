@@ -102,12 +102,46 @@ def pileup_features(target_seq: str, support_seqs: list[str]) -> dict:
         "support_margin": margin,
         "homopolymer_run_length": homopolymer,
         "tandem_repeat_flag": tandem,
+        "region_homopolymer_flag": [0] * length,
+        "region_tandem_repeat_flag": [0] * length,
+        "variant_mask": [0] * length,
+        "phased_variant_mask": [0] * length,
+        "preserve_mask": [0] * length,
+        "uncertainty_label": [0] * length,
+        "variant_rich_flag": [0] * length,
+        "confident_mask": [1] * length,
+        "support_forward_fraction": [0.5] * length,
+        "support_forward_count": [0] * length,
+        "support_reverse_count": [0] * length,
+        "support_same_haplotype_fraction": [0.0] * length,
+        "support_match_fraction": [0.0] * length,
+        "support_strand_bias": [0.0] * length,
+        "local_rule_density": [0] * length,
+        "local_mismatch_density": [0.0] * length,
+        "local_variant_density": [0.0] * length,
+        "nearby_indel_density": [0.0] * length,
+        "left_support_match_fraction": [0.0] * length,
+        "right_support_match_fraction": [0.0] * length,
+        "variant_proximity_flag": [0] * length,
+        "repeat_strength": [0.0] * length,
+        "mapping_quality_mean": [0.0] * length,
+        "mapping_quality_available": [0] * length,
+        "reference_kmer_uniqueness": [0.0] * length,
+        "reference_kmer_uniqueness_available": [0] * length,
+        "window_relative_position": [pos / max(length - 1, 1) for pos in range(length)],
         "boundary_flag": boundary,
         "neighbor_rule_flag": neighbor,
         "support_rule_type": support_rule_type,
         "support_rule_sub_base": support_rule_sub_base,
         "support_rule_ins_base": support_rule_ins_base,
     }
+
+
+def _feature_flag(features: dict, key: str, pos: int, default: float = 0.0) -> float:
+    values = features.get(key)
+    if values is None or pos >= len(values):
+        return default
+    return float(values[pos])
 
 
 def feature_matrix(example: dict) -> list[list[float]]:
@@ -129,6 +163,14 @@ def feature_matrix(example: dict) -> list[list[float]]:
                 float(f["tandem_repeat_flag"][pos]),
                 float(f["boundary_flag"][pos]),
                 float(f["neighbor_rule_flag"][pos]),
+                _feature_flag(f, "variant_mask", pos),
+                _feature_flag(f, "phased_variant_mask", pos),
+                _feature_flag(f, "preserve_mask", pos),
+                _feature_flag(f, "uncertainty_label", pos),
+                _feature_flag(f, "variant_rich_flag", pos),
+                _feature_flag(f, "region_homopolymer_flag", pos),
+                _feature_flag(f, "region_tandem_repeat_flag", pos),
+                _feature_flag(f, "confident_mask", pos, 1.0),
             ]
             + ins_fracs
         )
@@ -155,6 +197,11 @@ def rule_feature_matrix(example: dict) -> list[list[float]]:
                 float(f["neighbor_rule_flag"][pos]),
                 float(f["boundary_flag"][pos]),
                 1.0 if f["homopolymer_run_length"][pos] >= 4 else 0.0,
+                _feature_flag(f, "variant_mask", pos),
+                _feature_flag(f, "phased_variant_mask", pos),
+                _feature_flag(f, "preserve_mask", pos),
+                _feature_flag(f, "variant_rich_flag", pos),
+                1.0 - _feature_flag(f, "confident_mask", pos, 1.0),
             ]
         )
     return rows

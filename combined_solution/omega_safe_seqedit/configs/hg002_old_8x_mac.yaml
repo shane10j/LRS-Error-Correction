@@ -1,45 +1,44 @@
-name: hg002_chr20_mac
+name: hg002_old_8x_mac
 seed: 47
 
 paths:
-  output_dir: outputs/hg002_chr20_mac
+  output_dir: outputs/hg002_old_8x_mac
 
 data:
-  kind: real_bam
-  bam: /Users/shanejayasundera/LRS-Error-Correction/old_solution/data/subsets/hg002_chr20_12x/HG002.giab.subset.bam
+  kind: old_jsonl
+  sample: HG002
+  coverage: 8x
+  train_path: /Users/shanejayasundera/LRS-Error-Correction/old_solution/data/hg002_chr20_small_benchmark/hg002_chr20_primary_8x/chr20_small/train.jsonl
+  val_path: /Users/shanejayasundera/LRS-Error-Correction/old_solution/data/hg002_chr20_small_benchmark/hg002_chr20_primary_8x/chr20_small/val.jsonl
+  test_path: /Users/shanejayasundera/LRS-Error-Correction/old_solution/data/hg002_chr20_small_benchmark/hg002_chr20_primary_8x/chr20_small/test.jsonl
+  reads_bam: /Users/shanejayasundera/LRS-Error-Correction/old_solution/data/subsets/hg002_chr20_8x/HG002.giab.subset.bam
   reference_fasta: /Users/shanejayasundera/LRS-Error-Correction/old_solution/data/raw/giab/hg002/GCA_000001405.15_GRCh38_no_alt_analysis_set.fna
   truth_vcf: /Users/shanejayasundera/LRS-Error-Correction/old_solution/data/subsets/hg002_chr20_truth/HG002_chr20_benchmark.vcf.gz
   confident_bed: /Users/shanejayasundera/LRS-Error-Correction/old_solution/data/subsets/hg002_chr20_truth/HG002_chr20_confident.bed
-  contig: chr20
-  start: 10000000
-  end: 10200000
-  num_train: 1200
-  num_val: 200
-  num_test: 200
-  window_length: 768
-  max_support_reads: 12
-  min_read_length: 10000
-  truth_source: reference
+  max_examples:
+    train: 500
+    val: 100
+    test: 200
 
 model:
-  d_model: 128
-  num_layers: 3
+  d_model: 96
+  num_layers: 2
   num_heads: 4
   dropout: 0.08
-  max_len: 1024
+  max_len: 4096
   use_support: true
   use_rule_features: true
 
 train:
-  epochs: 5
-  batch_size: 4
+  epochs: 3
+  batch_size: 2
   lr: 0.0005
   weight_decay: 0.00001
   hard_edit_weight: 3.0
   false_edit_penalty: 1.2
-  support_rule_distill_weight: 0.6
+  support_rule_distill_weight: 0.7
   margin_weight: 0.5
-  margin: 0.75
+  margin: 0.8
   ins_payload_weight: 1.5
   sub_payload_weight: 1.5
   device: auto
@@ -48,15 +47,15 @@ decode:
   mode: hybrid
   support_rule_agreement_threshold: 0.75
   support_rule_insertion_threshold: 0.80
-  support_rule_deletion_threshold: 0.88
+  support_rule_deletion_threshold: 0.90
   rule_force_min_fraction:
     SUB: 0.88
     INS: 0.80
-    DEL: 0.92
+    DEL: 0.94
   rule_force_max_entropy:
     SUB: 0.80
     INS: 0.90
-    DEL: 0.60
+    DEL: 0.55
   neural_rescue_min_type_prob:
     SUB: 0.992
     INS: 0.992
@@ -65,7 +64,7 @@ decode:
   rule_negative_veto: true
   neighbor_abstention: true
   neighbor_radius: 1
-  neighbor_min_fraction: 0.94
+  neighbor_min_fraction: 0.95
   homopolymer_del_min_fraction: 0.98
   variant_aware_abstention: true
   variant_min_fraction: 0.985
@@ -112,5 +111,4 @@ decode:
   indel_neighbor_density_penalty: 0.08
   use_support_payload_for_insertions: true
 
-# Add external SOTA corrected FASTA/FASTQ outputs here after the HG002 subset exists.
 external_baselines: []

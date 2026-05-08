@@ -1,0 +1,82 @@
+name: synthetic_noisy_large_multiseed
+seed: 47
+
+paths:
+  output_dir: outputs/synthetic_noisy_large_multiseed
+
+multiseed:
+  seeds: [47, 48]
+  runs: [target_only, full]
+  modes:
+    full: [neural, hybrid]
+    target_only: [neural]
+
+data:
+  kind: synthetic
+  synthetic_profile: noisy_large
+  num_train: 800
+  num_val: 160
+  num_test: 160
+  read_length: 128
+  support_depth: 3
+  support_noise: 0.10
+  include_neighbor_cases: true
+  include_homopolymer_cases: true
+  shared_examples_across_splits: false
+
+model:
+  d_model: 128
+  num_layers: 2
+  num_heads: 4
+  dropout: 0.08
+  max_len: 512
+  use_support: true
+  use_rule_features: true
+
+train:
+  epochs: 5
+  batch_size: 8
+  lr: 0.0007
+  weight_decay: 0.00001
+  hard_edit_weight: 3.0
+  false_edit_penalty: 1.2
+  support_rule_distill_weight: 0.8
+  margin_weight: 0.6
+  margin: 0.8
+  ins_payload_weight: 1.6
+  sub_payload_weight: 1.6
+  device: auto
+
+decode:
+  mode: hybrid
+  support_rule_agreement_threshold: 0.70
+  support_rule_insertion_threshold: 0.70
+  support_rule_deletion_threshold: 0.85
+  rule_force_min_fraction:
+    SUB: 0.85
+    INS: 0.70
+    DEL: 0.92
+  rule_force_max_entropy:
+    SUB: 0.85
+    INS: 1.00
+    DEL: 0.60
+  neural_rescue_min_type_prob:
+    SUB: 0.99
+    INS: 0.99
+    DEL: 0.998
+  neural_rescue_min_payload_prob: 0.97
+  rule_negative_veto: true
+  neighbor_abstention: true
+  neighbor_radius: 1
+  neighbor_min_fraction: 0.94
+  homopolymer_del_min_fraction: 0.98
+  use_support_payload_for_insertions: true
+
+acceptance_targets:
+  full_hybrid:
+    beats_no_edit_usable: true
+    false_edit_rate_max: 0.01
+    false_del_count_max: 7
+    neighbor_induced_false_edits_max: 2
+
+external_baselines: []

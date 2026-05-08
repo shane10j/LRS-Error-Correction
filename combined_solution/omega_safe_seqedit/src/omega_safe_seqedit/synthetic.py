@@ -36,6 +36,105 @@ def _noisy_support(rng: random.Random, truth: str, depth: int, noise: float) -> 
     return reads
 
 
+def _mutate_base(seq: str, pos: int, base: str) -> str:
+    return seq[:pos] + base + seq[pos + 1 :]
+
+
+def _delete_base(seq: str, pos: int) -> str:
+    return seq[:pos] + seq[pos + 1 :]
+
+
+def _insert_base(seq: str, pos: int, base: str) -> str:
+    return seq[:pos] + base + seq[pos:]
+
+
+def _false_support(
+    rng: random.Random,
+    truth: str,
+    depth: int,
+    noise: float,
+    event_type: str,
+    pos: int,
+) -> list[str]:
+    """Create support where a shallow majority suggests a wrong edit."""
+    reads = _noisy_support(rng, truth, depth, noise)
+    wrong_count = max(2, int(round(depth * 0.60)))
+    for idx in range(min(wrong_count, len(reads))):
+        if event_type == "SUB":
+            if reads[idx]:
+                reads[idx] = _mutate_base(
+                    reads[idx],
+                    min(pos, len(reads[idx]) - 1),
+                    _other_base(rng, truth[min(pos, len(truth) - 1)]),
+                )
+        elif event_type == "DEL" and len(reads[idx]) > pos:
+            reads[idx] = _delete_base(reads[idx], pos)
+        elif event_type == "INS":
+            reads[idx] = _insert_base(reads[idx], min(pos, len(reads[idx])), rng.choice(BASES))
+    return reads
+
+
+def _case_list(profile: str, include_neighbor_cases: bool, include_homopolymer_cases: bool) -> list[str]:
+    base_cases = ["copy"] + [f"sub_{base}" for base in BASES] + [f"ins_{base}" for base in BASES] + ["del"]
+    if include_homopolymer_cases:
+        base_cases += ["homopolymer_ins", "homopolymer_del"]
+    if include_neighbor_cases:
+        base_cases += ["neighbor_sub_ins", "neighbor_del_sub"]
+    if profile == "noisy_curated":
+        return [
+            "copy",
+            "copy_false_sub",
+            "copy_false_del",
+            "copy_false_ins",
+            "sub_A",
+            "sub_C",
+            "sub_G",
+            "sub_T",
+            "ins_A",
+            "ins_C",
+            "ins_G",
+            "ins_T",
+            "del",
+            "homopolymer_del",
+            "neighbor_sub_ins",
+            "neighbor_del_sub",
+            "boundary_ins_A",
+            "boundary_ins_G",
+            "copy_long",
+            "copy_false_del_homopolymer",
+            "support_rule_wrong_neighbor",
+            "support_rule_wrong_hpoly_del",
+            "noisy_true_sub",
+            "noisy_true_ins",
+        ]
+    if profile == "noisy_large":
+        return base_cases + [
+            "copy_false_sub",
+            "copy_false_del",
+            "copy_false_ins",
+            "copy_false_del_homopolymer",
+            "support_rule_wrong_neighbor",
+            "support_rule_wrong_hpoly_del",
+            "boundary_ins_A",
+            "boundary_ins_G",
+            "noisy_true_sub",
+            "noisy_true_ins",
+            "noisy_true_del",
+        ]
+    if profile == "false_del_regression":
+        return [
+            "copy_false_del",
+            "copy_false_del_homopolymer",
+            "support_rule_wrong_neighbor",
+            "support_rule_wrong_hpoly_del",
+            "neighbor_del_sub",
+            "homopolymer_del",
+            "del",
+            "copy",
+        ]
+    return base_cases
+
+
 def _example(example_id: str, sample: str, target: str, truth: str, support: list[str], kind: str) -> dict:
     labels = make_edit_labels(target, truth)
     features = pileup_features(target, support)
@@ -70,21 +169,17 @@ def make_synthetic_split(
     support_noise: float,
     include_neighbor_cases: bool = True,
     include_homopolymer_cases: bool = True,
+    profile: str = "standard",
 ) -> list[dict]:
     rng = random.Random(seed)
-    cases = ["copy"]
-    cases += [f"sub_{base}" for base in BASES]
-    cases += [f"ins_{base}" for base in BASES]
-    cases += ["del"]
-    if include_homopolymer_cases:
-        cases += ["homopolymer_ins", "homopolymer_del"]
-    if include_neighbor_cases:
-        cases += ["neighbor_sub_ins", "neighbor_del_sub"]
+    cases = _case_list(profile, include_neighbor_cases, include_homopolymer_cases)
     records = []
     for idx in range(count):
         case = cases[idx % len(cases)]
         truth = _rand_seq(rng, read_length)
-        pos = rng.randint(5, read_length - 6)
+        if "long" in case:
+            truth = _rand_seq(rng, read_length * 2)
+        pos = rng.randint(5, len(truth) - 6)
         target = truth
         if case.startswith("sub_"):
             wanted = case[-1]
@@ -110,6 +205,49 @@ def make_synthetic_split(
         elif case == "neighbor_del_sub":
             truth = truth[:pos] + "G" + truth[pos + 1 :]
             target = truth[:pos] + "T" + _other_base(rng, "G") + truth[pos + 1 :]
-        support = _noisy_support(rng, truth, support_depth, support_noise)
+        elif case == "boundary_ins_A":
+            truth = "A" + truth
+            target = truth[1:]
+            pos = 0
+        elif case == "boundary_ins_G":
+            truth = "G" + truth
+            target = truth[1:]
+            pos = 0
+        elif case == "noisy_true_sub":
+            wanted = rng.choice(BASES)
+            truth = truth[:pos] + wanted + truth[pos + 1 :]
+            target = truth[:pos] + _other_base(rng, wanted) + truth[pos + 1 :]
+        elif case == "noisy_true_ins":
+            wanted = rng.choice(BASES)
+            truth = truth[:pos] + wanted + truth[pos:]
+            target = truth[:pos] + truth[pos + 1 :]
+        elif case == "noisy_true_del":
+            target = truth[:pos] + rng.choice(BASES) + truth[pos:]
+        elif case == "copy_false_del_homopolymer":
+            truth = truth[:pos] + "AAAAAA" + truth[pos + 6 :]
+            target = truth
+            pos = pos + 2
+        elif case == "support_rule_wrong_neighbor":
+            # Truth contains one real neighboring event; support also suggests an extra false nearby edit.
+            truth = truth[:pos] + "T" + truth[pos + 1 :]
+            target = truth[:pos] + _other_base(rng, "T") + truth[pos + 1 :]
+        elif case == "support_rule_wrong_hpoly_del":
+            truth = truth[:pos] + "CCCCC" + truth[pos + 5 :]
+            target = truth
+            pos = pos + 2
+        if case == "copy_false_sub":
+            support = _false_support(rng, truth, support_depth, support_noise, "SUB", pos)
+        elif case == "copy_false_del":
+            support = _false_support(rng, truth, support_depth, support_noise, "DEL", pos)
+        elif case == "copy_false_ins":
+            support = _false_support(rng, truth, support_depth, support_noise, "INS", pos)
+        elif case == "copy_false_del_homopolymer":
+            support = _false_support(rng, truth, support_depth, support_noise, "DEL", pos)
+        elif case == "support_rule_wrong_neighbor":
+            support = _false_support(rng, truth, support_depth, support_noise, "DEL", min(pos + 1, len(truth) - 1))
+        elif case == "support_rule_wrong_hpoly_del":
+            support = _false_support(rng, truth, support_depth, support_noise, "DEL", pos)
+        else:
+            support = _noisy_support(rng, truth, support_depth, support_noise)
         records.append(_example(f"{split}_{case}_{idx}", split, target, truth, support, case))
     return records

@@ -67,11 +67,12 @@ decode:
   homopolymer_del_min_fraction: 0.97
   use_support_payload_for_insertions: true
 
-external_baselines:
-  # Add SOTA outputs here after running them outside this lightweight repo.
-  # - name: dorado_or_medaka
-  #   path: /path/to/corrected.fastq
-  #   format: fastq
-  # - name: herro_or_dechat
-  #   path: /path/to/corrected.fasta
-  #   format: fasta
+# Add SOTA outputs here after running them outside this lightweight repo.
+# external_baselines:
+#   - name: dorado_or_medaka
+#     path: /path/to/corrected.fastq
+#     format: fastq
+#   - name: herro_or_dechat
+#     path: /path/to/corrected.fasta
+#     format: fasta
+external_baselines: []
