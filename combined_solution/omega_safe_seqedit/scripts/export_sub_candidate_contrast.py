@@ -30,6 +30,8 @@ SUB_COLUMNS = [
     "type_prob_sub",
     "payload_prob",
     "support_depth",
+    "support_ins_count",
+    "support_del_count",
     "support_fraction",
     "support_margin",
     "entropy",

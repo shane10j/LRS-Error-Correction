@@ -179,6 +179,8 @@ def _context_row(row: dict, record: dict, fasta, config: dict, flank: int, score
             key: row.get(key)
             for key in [
                 "support_depth",
+                "support_ins_count",
+                "support_del_count",
                 "support_fraction",
                 "support_margin",
                 "entropy",

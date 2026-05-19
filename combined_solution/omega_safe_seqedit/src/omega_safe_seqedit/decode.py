@@ -208,7 +208,16 @@ def _safe_true_sub_recovery_passes(
     details["safe_recovery_sub_type_prob"] = type_prob
     details["safe_recovery_sub_payload_prob"] = payload_prob
     if decode.get("ranked_sub_recovery_mode", False):
-        if details.get("local_gain", 0.0) < float(decode.get("ranked_sub_recovery_min_local_gain", 0.25)):
+        if (conf.get("support_ins_count", 0.0) + conf.get("support_del_count", 0.0)) > float(
+            decode.get("ranked_sub_max_site_indel_evidence", 0.0)
+        ):
+            reasons.append("ranked_sub_site_indel_evidence")
+        # Ranked recovery allowlists are produced by scripts/rank_sub_recovery_candidates.py
+        # with a wider local-window scorer. Avoid silently re-vetoing those candidates
+        # with the older small-radius decoder reranker unless explicitly requested.
+        if decode.get("ranked_sub_runtime_local_gain_check", False) and details.get("local_gain", 0.0) < float(
+            decode.get("ranked_sub_recovery_min_local_gain", 0.25)
+        ):
             reasons.append("ranked_sub_local_gain_too_low")
         if int(sub_probs[pos].argmax()) != BASES.index(rule_base):
             reasons.append("ranked_sub_payload_argmax_disagrees")
